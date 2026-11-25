@@ -35,7 +35,7 @@ export default function Home() {
   const [peers, setPeers] = useState<Peer[]>([]);
   const [discovering, setDiscovering] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
-  const [serverInfo, setServerInfo] = useState<{ deviceName?: string; addresses?: string[]; id?: string } | null>(null);
+  const [serverInfo, setServerInfo] = useState<{ deviceName?: string; addresses?: string[]; id?: string; version?: string } | null>(null);
   const [tunnel, setTunnel] = useState<{ active: boolean; url: string | null; provider?: string | null }>({ active: false, url: null });
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
@@ -57,6 +57,10 @@ export default function Home() {
 
   useEffect(() => { reloadRooms(); }, [reloadRooms]);
   useEffect(() => { api.serverInfo().then(setServerInfo).catch(() => {}); }, []);
+  // Версия и в заголовке окна ОС — видно при переключении окон.
+  useEffect(() => {
+    if (serverInfo?.version) document.title = `WatchTogether v${serverInfo.version}`;
+  }, [serverInfo?.version]);
   useEffect(() => { getDesktop()?.tunnelStatus().then(setTunnel).catch(() => {}); }, []);
   useEffect(() => { getDesktop()?.ztStatus?.().then(setZt).catch(() => {}); }, []);
   // Автообновление: начальный статус + события из main-процесса.
@@ -208,7 +212,12 @@ export default function Home() {
           <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden><path d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
         </div>
         <div className="min-w-0">
-          <h1 className="text-lg font-bold leading-tight tracking-tight text-zinc-50">WatchTogether</h1>
+          <h1 className="text-lg font-bold leading-tight tracking-tight text-zinc-50">
+            WatchTogether
+            {serverInfo?.version && (
+              <span className="ml-2 rounded bg-zinc-800 px-1.5 py-0.5 align-middle text-xs font-normal text-zinc-400">v{serverInfo.version}</span>
+            )}
+          </h1>
           <p className="truncate text-xs text-zinc-500">
             {serverInfo?.deviceName ?? 'Совместный просмотр'}
             {serverInfo?.addresses?.[0] ? ` · http://${serverInfo.addresses[0]}:${location.port}` : ''}

@@ -81,6 +81,9 @@ export default function Room() {
   const [hostStream, setHostStream] = useState<MediaStream | null>(null);
   const [streamUrlInput, setStreamUrlInput] = useState('');
   const [streamPlayerOnly, setStreamPlayerOnly] = useState(true);
+  // Прокси для страниц трансляции: VPN многих работает только для браузера,
+  // а скрытое окно идёт напрямую (YouTube: «Нет подключения»). Храним локально.
+  const [streamProxy, setStreamProxy] = useState(() => localStorage.getItem('wt-stream-proxy') ?? '');
   const [streamBusy, setStreamBusy] = useState(false);
   // Загрузка страницы в окне трансляции: у ведущего — локальные события Electron,
   // у зрителей — ретрансляция по комнате. Нужно, чтобы вместо белого экрана
@@ -205,11 +208,16 @@ export default function Room() {
   const startStream = useCallback(async () => {
     const socket = sync.getSocket();
     const url = streamUrlInput.trim();
-    if (!socket || !url || !getDesktop()) return;
+    const d = getDesktop();
+    if (!socket || !url || !d) return;
     setStreamBusy(true);
     setStreamPageLoading(true); // страница ещё даже не начала грузиться — уже показываем спиннер
     setStreamPageError(null);
     try {
+      // Прокси (если задан) — до открытия окна: страница сразу пойдёт через VPN.
+      const proxy = streamProxy.trim();
+      localStorage.setItem('wt-stream-proxy', proxy);
+      await d.setProxy(proxy);
       const host = new StreamHost(socket);
       host.onStream = (s) => setHostStream(s);
       host.onEnded = () => stopStream();
@@ -222,7 +230,7 @@ export default function Room() {
       setStreamBusy(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync.getSocket, streamUrlInput, streamPlayerOnly, stopStream]);
+  }, [sync.getSocket, streamUrlInput, streamPlayerOnly, streamProxy, stopStream]);
 
   // Уходим со страницы комнаты — трансляция останавливается, окно закрывается.
   useEffect(() => () => {
@@ -664,11 +672,18 @@ export default function Room() {
 
   const amStreamHost = !!sync.streamInfo?.active && sync.streamInfo.hostClientId === getClientId();
 
+  // Версия приложения — видна в шапке комнаты, чтобы не гадать при отладке.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => { api.serverInfo().then((i) => setAppVersion(i.version)).catch(() => {}); }, []);
+
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-[1920px] flex-col gap-4 px-4 py-6">
       <header className="flex flex-wrap items-center gap-3">
         <Button variant="outline" size="sm" onClick={() => navigate('/')}>← Назад</Button>
         <h1 className="text-lg font-semibold text-zinc-50">{sync.room?.name ?? 'Комната'}</h1>
+        {appVersion && (
+          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400">v{appVersion}</span>
+        )}
         <span className={`rounded-full px-2 py-0.5 text-xs ${
           sync.connected ? 'bg-emerald-500/15 text-emerald-300' : 'bg-red-500/15 text-red-300'
         }`}>
@@ -1111,6 +1126,20 @@ export default function Room() {
                         />
                         Только плеер: заблокировать переходы по странице (для LostFilm/LordSerial)
                       </label>
+                      <div className="flex flex-col gap-1">
+                        <Input
+                          value={streamProxy}
+                          onChange={(e) => setStreamProxy(e.target.value)}
+                          placeholder="Прокси для трансляции (необязательно): socks5://127.0.0.1:10808"
+                          aria-label="Прокси для трансляции"
+                        />
+                        <p className="text-xs text-zinc-500">
+                          Если сайт доступен только через VPN (YouTube пишет «Нет подключения»): укажите локальный
+                          прокси вашего VPN-клиента — у V2Ray/Nekoray это обычно socks5://127.0.0.1:10808,
+                          у sing-box — socks5://127.0.0.1:2080 (смотрите в настройках «смешанный/socks порт»).
+                          Комната и локальная сеть идут мимо прокси — конфликта не будет.
+                        </p>
+                      </div>
                       <div>
                         <Button onClick={startStream} disabled={streamBusy || !streamUrlInput.trim()}>
                           {streamBusy ? 'Запускаем…' : 'Начать трансляцию'}

@@ -107,11 +107,14 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  // Микрофон для голосовой комнаты: разрешаем запросы media без системного диалога.
+  // Микрофон для голосовой комнаты, буфер обмена и ПОЛНЫЙ ЭКРАН (без него
+  // кнопка «во весь экран» молча не работает — Chromium ждёт разрешения,
+  // а наш фильтр по умолчанию всё отклонял).
+  const ALLOWED_PERMISSIONS = new Set(['media', 'clipboard-sanitized-write', 'fullscreen', 'pointerLock']);
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
-    callback(permission === 'media' || permission === 'clipboard-sanitized-write');
+    callback(ALLOWED_PERMISSIONS.has(permission));
   });
-  session.defaultSession.setPermissionCheckHandler((_wc, permission) => permission === 'media');
+  session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(permission));
 
   // Захват окна трансляции: когда рендерер зовёт getDisplayMedia, отдаём ему
   // заранее найденное окно со стримом + системный звук (loopback, Windows).
@@ -608,6 +611,24 @@ ipcMain.handle('wt:tunnel-stop', () => {
 });
 
 ipcMain.handle('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl, provider: tunnelProvider }));
+
+// Прокси для окна трансляции: у многих VPN — раздельное туннелирование по
+// приложениям или вообще расширение браузера, поэтому скрытое окно трансляции
+// идёт мимо VPN (YouTube показывает «Нет подключения к интернету»). Хост
+// указывает локальный прокси своего VPN-клиента (например socks5://127.0.0.1:10808),
+// и страницы трансляции идут через него. Локальные адреса обходят прокси,
+// чтобы не ломать связь с нашим сервером и LAN-гостями.
+ipcMain.handle('wt:set-proxy', async (_e, { rules }) => {
+  const r = String(rules ?? '').trim();
+  try {
+    await session.defaultSession.setProxy(r
+      ? { proxyRules: r, proxyBypassRules: 'localhost;127.0.0.1;<local>;192.168.*;10.*;169.254.*' }
+      : {});
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+});
 
 // ─── Автообновления из GitHub Releases ───
 // electron-updater смотрит latest.yml релиза MyLitleProger/WatchTogether:

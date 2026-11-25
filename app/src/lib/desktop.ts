@@ -33,6 +33,8 @@ export interface WtDesktop {
   ztJoin(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztLeave(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztDownload(): Promise<{ ok: boolean }>;
+  // Прокси для страниц трансляции: 'socks5://127.0.0.1:10808' или '' — выкл.
+  setProxy(rules: string): Promise<{ ok: boolean; error?: string }>;
   // Автообновления из GitHub Releases.
   updateStatus(): Promise<{ status: string; version: string | null }>;
   updateCheck(): Promise<{ ok: boolean; error?: string }>;
