@@ -136,6 +136,7 @@ app.whenReady().then(async () => {
   }
   registerAuthHandlers();
   await createWindow();
+  setupAutoUpdate();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -607,6 +608,73 @@ ipcMain.handle('wt:tunnel-stop', () => {
 });
 
 ipcMain.handle('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl, provider: tunnelProvider }));
+
+// ─── Автообновления из GitHub Releases ───
+// electron-updater смотрит latest.yml релиза MyLitleProger/WatchTogether:
+// свежая версия качается в фоне, UI получает событие и предлагает перезапуск.
+// Работает только в установленном приложении (в dev-режиме — молча выключено).
+let updateState = { status: 'idle', version: null };
+
+function notifyUpdate() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('wt:update', updateState);
+  }
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged) return;
+  let autoUpdater;
+  try {
+    ({ autoUpdater } = require('electron-updater'));
+  } catch (e) {
+    console.error('[update] electron-updater недоступен:', e?.message ?? e);
+    return;
+  }
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => {
+    if (updateState.status === 'idle') { updateState = { status: 'checking', version: null }; }
+  });
+  autoUpdater.on('update-available', (info) => {
+    updateState = { status: 'downloading', version: info.version };
+    notifyUpdate();
+  });
+  autoUpdater.on('update-not-available', () => {
+    if (updateState.status === 'checking') updateState = { status: 'idle', version: null };
+  });
+  autoUpdater.on('update-downloaded', (info) => {
+    updateState = { status: 'ready', version: info.version };
+    notifyUpdate();
+  });
+  autoUpdater.on('error', (e) => {
+    console.error('[update]', e?.message ?? e);
+    updateState = { status: 'error', version: null };
+    notifyUpdate();
+  });
+  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  check();
+  setInterval(check, 4 * 60 * 60 * 1000); // каждые 4 часа
+}
+
+ipcMain.handle('wt:update-status', () => updateState);
+ipcMain.handle('wt:update-check', async () => {
+  if (!app.isPackaged) return { ok: false, error: 'dev' };
+  try {
+    const { autoUpdater } = require('electron-updater');
+    updateState = { status: 'checking', version: null };
+    notifyUpdate();
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
+});
+ipcMain.handle('wt:update-install', () => {
+  try {
+    const { autoUpdater } = require('electron-updater');
+    autoUpdater.quitAndInstall();
+  } catch { /* noop */ }
+});
 
 // ─── ZeroTier (виртуальная LAN «как Hamachi») ───
 // Друзья в одной ZeroTier-сети получают общий виртуальный сегмент, и наш

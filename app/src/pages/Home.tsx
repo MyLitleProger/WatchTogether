@@ -44,6 +44,8 @@ export default function Home() {
   const [ztNetId, setZtNetId] = useState('');
   const [ztBusy, setZtBusy] = useState(false);
   const [ztMsg, setZtMsg] = useState<string | null>(null);
+  // Автообновление: статус из main-процесса (idle/checking/downloading/ready/error).
+  const [update, setUpdate] = useState<{ status: string; version: string | null }>({ status: 'idle', version: null });
   // Десктоп-приложение ушло на чужой сервер (Подключиться) — комнаты и
   // туннель там чужие; показываем баннер с возвратом на свой сервер.
   const onRemoteHost = !!getDesktop()
@@ -57,6 +59,13 @@ export default function Home() {
   useEffect(() => { api.serverInfo().then(setServerInfo).catch(() => {}); }, []);
   useEffect(() => { getDesktop()?.tunnelStatus().then(setTunnel).catch(() => {}); }, []);
   useEffect(() => { getDesktop()?.ztStatus?.().then(setZt).catch(() => {}); }, []);
+  // Автообновление: начальный статус + события из main-процесса.
+  useEffect(() => {
+    const d = getDesktop();
+    if (!d?.onUpdate) return;
+    d.updateStatus?.().then(setUpdate).catch(() => {});
+    return d.onUpdate(setUpdate);
+  }, []);
   // Туннель оборвался сам — показываем ошибку и возвращаем кнопку запуска.
   useEffect(() => {
     const d = getDesktop();
@@ -215,6 +224,21 @@ export default function Home() {
         </div>
       </header>
       {error && <p className="text-sm text-red-400">{error}</p>}
+
+      {/* баннер автообновления (десктоп): готово → предложить перезапуск */}
+      {update.status === 'ready' && update.version && (
+        <section className="flex flex-wrap items-center gap-3 rounded-2xl border border-emerald-500/40 bg-emerald-500/10 p-4">
+          <p className="min-w-0 flex-1 text-sm text-emerald-200">
+            Готово обновление до версии {update.version} — скачано, осталось перезапустить.
+          </p>
+          <Button size="sm" className="shrink-0" onClick={() => { void getDesktop()?.updateInstall(); }}>
+            Обновить и перезапустить
+          </Button>
+        </section>
+      )}
+      {update.status === 'downloading' && update.version && (
+        <p className="text-xs text-zinc-500">Качаем обновление {update.version} в фоне…</p>
+      )}
 
       {/* десктоп-приложение, подключённое к чужому серверу: возврат на свой */}
       {onRemoteHost && (

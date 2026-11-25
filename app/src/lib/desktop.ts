@@ -33,6 +33,12 @@ export interface WtDesktop {
   ztJoin(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztLeave(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztDownload(): Promise<{ ok: boolean }>;
+  // Автообновления из GitHub Releases.
+  updateStatus(): Promise<{ status: string; version: string | null }>;
+  updateCheck(): Promise<{ ok: boolean; error?: string }>;
+  updateInstall(): Promise<void>;
+  // Смена статуса обновления: idle | checking | downloading | ready | error.
+  onUpdate(cb: (s: { status: string; version: string | null }) => void): () => void;
 }
 
 export function getDesktop(): WtDesktop | null {

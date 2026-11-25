@@ -50,8 +50,14 @@ const outDir = process.env.WT_OUT || pkg.build.directories.output;
 
 builder.build({
   targets: builder.Platform.WINDOWS.createTarget(['nsis']),
+  // С GH_TOKEN в окружении релиз сразу публикуется в GitHub Releases
+  // (latest.yml + exe + blockmap) — оттуда работают автообновления.
+  // Провайдер публикации задаём здесь, а не в package.json: electron-builder
+  // склеивает конфиг из package.json с программным и ломает массив publish.
+  publish: process.env.GH_TOKEN ? 'always' : 'never',
   config: {
     ...pkg.build,
+    publish: [{ provider: 'github', owner: 'MyLitleProger', repo: 'WatchTogether', releaseType: 'release' }],
     directories: { ...pkg.build.directories, output: outDir },
     extraResources: [
       { from: stage, to: 'server' },

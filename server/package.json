@@ -1,6 +1,6 @@
 {
   "name": "watchtogether-server",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "private": true,
   "type": "module",
   "description": "Локальный сервер WatchTogether: комнаты, синхронизация, персистентность, LAN-discovery",

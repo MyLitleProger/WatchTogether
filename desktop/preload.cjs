@@ -31,6 +31,16 @@ contextBridge.exposeInMainWorld('wtDesktop', {
   ztJoin: (networkId) => ipcRenderer.invoke('wt:zt-join', { networkId }),
   ztLeave: (networkId) => ipcRenderer.invoke('wt:zt-leave', { networkId }),
   ztDownload: () => ipcRenderer.invoke('wt:zt-download'),
+  // Автообновления из GitHub Releases.
+  updateStatus: () => ipcRenderer.invoke('wt:update-status'),
+  updateCheck: () => ipcRenderer.invoke('wt:update-check'),
+  updateInstall: () => ipcRenderer.invoke('wt:update-install'),
+  // Событие смены статуса обновления: {status, version}. Возвращает отписку.
+  onUpdate: (cb) => {
+    const listener = (_e, s) => cb(s);
+    ipcRenderer.on('wt:update', listener);
+    return () => ipcRenderer.removeListener('wt:update', listener);
+  },
   // Порт встроенного сервера на ЭТОМ компьютере — чтобы вернуться на свой
   // сервер после подключения к чужому (клиент переходит целиком на хост).
   localPort: Number(process.env.WT_PORT ?? 9345),
