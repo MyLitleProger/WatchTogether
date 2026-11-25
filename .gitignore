@@ -1,0 +1,24 @@
+# Зависимости и сборка
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Локальные данные сервера (комнаты, история, провайдеры)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Готовые установщики (публикуются через GitHub Releases, не в git)
+release/
+release.zip
+
+# Логи и мусор
+*.log
+NUL
+NVIDIA Corporation/
+wt-test-profile*/
+
+# OS
+Thumbs.db
+.DS_Store

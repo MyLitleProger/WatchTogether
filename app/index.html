@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WatchTogether</title>
+    <style>
+      /* Сплэш на время загрузки бандла: без него при медленном канале
+         (туннель) пользователь видел просто белый экран. */
+      html, body { margin: 0; background: #0e0c12; }
+      #wt-splash {
+        position: fixed; inset: 0; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; gap: 14px;
+        color: #a1a1aa; font: 14px/1.4 system-ui, sans-serif;
+        background: #0e0c12;
+      }
+      #wt-splash .spin {
+        width: 26px; height: 26px; border-radius: 50%;
+        border: 3px solid #3f3f46; border-top-color: #fbbf24;
+        animation: wt-spin 0.9s linear infinite;
+      }
+      @keyframes wt-spin { to { transform: rotate(360deg); } }
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div id="wt-splash">
+        <div class="spin"></div>
+        <div>Загрузка WatchTogether…</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

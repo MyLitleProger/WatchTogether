@@ -1,0 +1,14 @@
+{
+  "name": "watchtogether",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Сервис совместного просмотра фильмов и сериалов в LAN и по туннелю",
+  "scripts": {
+    "dev:app": "npm --prefix app run dev",
+    "dev:server": "npm --prefix server run start",
+    "build": "node build.mjs",
+    "start": "npm --prefix server run start",
+    "smoke": "node server/scripts/smoke-sync.mjs",
+    "dist": "node build.mjs --installer"
+  }
+}
