@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { seedProviders, encryptStoredCookies } from './db.js';
 import { registerRoutes } from './rooms.js';
 import { setupSync } from './sync.js';
+import { registerLibraryRoutes, startLibraryRescans } from './library.js';
 import { startDiscoveryResponder, discoverPeers, localAddresses } from './discovery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -26,6 +27,7 @@ async function main() {
   // origin) — см. rooms.ts. Глобальный «*» позволял любому сайту в браузере
   // пользователя дёргать API localhost:9345.
   await registerRoutes(app);
+  await registerLibraryRoutes(app);
 
   // Активный поиск других хостов в LAN (из UI «найти устройства»).
   app.get('/api/discover', async () => ({ peers: await discoverPeers() }));
@@ -47,6 +49,7 @@ async function main() {
 
   await app.listen({ port: PORT, host: HOST });
   setupSync(app.server);
+  startLibraryRescans(); // медиатека: сканирование в фоне при старте и раз в 10 минут
   startDiscoveryResponder(PORT, localAddresses());
 
   const addrs = localAddresses();

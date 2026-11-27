@@ -1,15 +1,16 @@
 // Комната: плеер + синхронизация + участники + выбор видео (поиск или прямая ссылка).
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Navigate, useNavigate, useParams } from 'react-router';
+import { Navigate, useLocation, useNavigate, useParams } from 'react-router';
 import { Player, type PlayerHandle, extractYouTubeId } from '@/components/Player';
 import { SearchPanel } from '@/components/SearchPanel';
+import { LibraryPanel } from '@/components/LibraryPanel';
 import { Chat } from '@/components/Chat';
 import { VoicePanel } from '@/components/VoicePanel';
 import { StreamView } from '@/components/StreamView';
 import { StreamHost } from '@/lib/streamHost';
 import { useRoomSync } from '@/hooks/useRoomSync';
 import { getClientId, getNickname } from '@/lib/identity';
-import { api, type EpisodeInfo, type HistoryEntry, type RutubeSeasonPack, type SearchResult, type SyncState, type WatchSource, proxiedStream, isRutubeUrl } from '@/lib/api';
+import { api, type EpisodeInfo, type HistoryEntry, type RutubeSeasonPack, type SearchResult, type SyncState, type WatchSource, proxiedStream, isRutubeUrl, librarySource, type LibraryFile } from '@/lib/api';
 import { getDesktop, type SniffResult } from '@/lib/desktop';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -75,7 +76,7 @@ export default function Room() {
   const [queueUrl, setQueueUrl] = useState('');
   const [queueMsg, setQueueMsg] = useState<string | null>(null);
   // Вкладки под плеером: поиск / серии / очередь / история / трансляция.
-  const [tab, setTab] = useState<'search' | 'episodes' | 'queue' | 'history' | 'stream'>('search');
+  const [tab, setTab] = useState<'search' | 'library' | 'episodes' | 'queue' | 'history' | 'stream'>('search');
   // Трансляция сайта: объект ведущего живёт здесь (только у того, кто ведёт).
   const streamHostRef = useRef<StreamHost | null>(null);
   const [hostStream, setHostStream] = useState<MediaStream | null>(null);
@@ -92,6 +93,20 @@ export default function Room() {
   const [streamPageError, setStreamPageError] = useState<string | null>(null);
 
   const sync = useRoomSync(roomId, nickname, password || undefined);
+
+  // «Смотреть» в медиатеке на главной: комната создана, видео пришло в state
+  // навигации — включаем его один раз, как только вошли и можем управлять.
+  const routeLocation = useLocation();
+  const autoPlayDone = useRef(false);
+  useEffect(() => {
+    const play = (routeLocation.state as { play?: WatchSource } | null)?.play;
+    if (!play || autoPlayDone.current || !sync.connected || !sync.canControl) return;
+    autoPlayDone.current = true;
+    setVideo(play);
+    sync.setVideo(play);
+    navigate(routeLocation.pathname, { replace: true, state: null }); // не повторять при обновлении
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sync.connected, sync.canControl]);
 
   // Применяем авторитетное состояние от сервера к плееру.
   // lastSync хранит момент получения — позицию досчитываем по своим часам:
@@ -486,6 +501,13 @@ export default function Room() {
   };
 
   // --- очередь ---
+  // Файл медиатеки хоста: включить сейчас для всех.
+  const playLibrary = (f: LibraryFile) => {
+    const source = librarySource(f);
+    setVideo(source);
+    sync.setVideo(source);
+  };
+
   const queueSource = (source: WatchSource) => {
     sync.queueAdd(source);
     setQueueMsg(`В очереди: ${source.title ?? source.url}`);
@@ -665,6 +687,7 @@ export default function Room() {
 
   const tabs: { id: typeof tab; label: string }[] = [
     { id: 'search', label: 'Поиск' },
+    { id: 'library', label: 'Медиатека' },
     ...(episodesActive ? [{ id: 'episodes' as const, label: 'Серии' }] : []),
     { id: 'queue', label: `Очередь${sync.queue.length > 0 ? ` (${sync.queue.length})` : ''}` },
     { id: 'history', label: 'История' },
@@ -901,6 +924,10 @@ export default function Room() {
             <div className="p-4">
               {tab === 'search' && (
                 <SearchPanel onPick={pickResult} onQueue={queueResult} />
+              )}
+
+              {tab === 'library' && (
+                <LibraryPanel onPlay={playLibrary} onQueue={(f) => queueSource(librarySource(f))} />
               )}
 
               {tab === 'episodes' && episodesActive && (

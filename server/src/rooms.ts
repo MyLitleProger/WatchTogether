@@ -11,6 +11,7 @@ import { searchProviders } from './providers/index.js';
 import { getSeriesEpisodes, getEpisodeStream } from './providers/lostfilm.js';
 import { getLordSerialEpisodes, getLordSerialStream } from './providers/lordserial.js';
 import { getRutubeStream, getRutubeSeasonPack } from './providers/rutube.js';
+import { getRuTrackerTopic, ProviderError } from './providers/rutracker.js';
 import { APP_VERSION } from './version.js';
 import { deviceName, localAddresses, INSTANCE_ID } from './discovery.js';
 import {
@@ -250,6 +251,30 @@ export async function registerRoutes(app: FastifyInstance) {
     }
   });
 
+  // --- RuTracker: magnet-ссылка раздачи (смотреть раздачу напрямую нельзя —
+  // её качает торрент-клиент, а файлы появляются в медиатеке) ---
+  const rutrackerConfig = () => {
+    const row = listProviders().find((p) => p.id === 'rutracker');
+    return row ? JSON.parse(row.config_json) : {};
+  };
+
+  app.get('/api/rutracker/topic', async (req, reply) => {
+    const { url } = req.query as { url?: string };
+    if (!url) return reply.code(400).send({ error: 'Нужен url раздачи' });
+    const config = rutrackerConfig();
+    if (!isMirrorUrl(url, mirrorHosts(config.mirrors)) || !/\/forum\/viewtopic\.php\?t=\d+$/.test(url)) {
+      return reply.code(400).send({ error: 'Ссылка не на раздачу RuTracker из настроек источника' });
+    }
+    try {
+      return await getRuTrackerTopic(url, config);
+    } catch (e) {
+      const code = e instanceof ProviderError ? e.code : 'ERROR';
+      return reply.code(code === 'NEED_LOGIN' ? 401 : 502).send({
+        error: e instanceof Error ? e.message : String(e), code,
+      });
+    }
+  });
+
   // --- история просмотра комнаты ---
   app.get('/api/rooms/:id/history', async (req, reply) => {
     const { id } = req.params as { id: string };
@@ -272,8 +297,7 @@ export async function registerRoutes(app: FastifyInstance) {
     if (!q?.trim()) return reply.code(400).send({ error: 'Пустой запрос' });
     if (q.length > 200) return reply.code(400).send({ error: 'Слишком длинный запрос' });
     const ids = providers ? providers.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
-    const results = await searchProviders(q.trim(), ids);
-    return { results };
+    return await searchProviders(q.trim(), ids);
   });
 
   // --- Медиа-прокси: /api/proxy/stream?url=...&referer=... ---

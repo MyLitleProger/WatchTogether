@@ -5,6 +5,7 @@ import { searchLostFilm } from './lostfilm.js';
 import { searchLordSerial } from './lordserial.js';
 import { searchRutube } from './rutube.js';
 import { searchCustom } from './custom.js';
+import { searchRuTracker, ProviderError } from './rutracker.js';
 
 export interface SearchResult {
   provider: string;
@@ -31,11 +32,22 @@ const registry: Record<ProviderRow['type'], Provider['search']> = {
   lostfilm: searchLostFilm,
   lordserial: searchLordSerial,
   rutube: searchRutube,
+  rutracker: searchRuTracker,
   custom: searchCustom,
 };
 
-// Поиск сразу по нескольким провайдерам; ошибка одного не роняет остальные.
-export async function searchProviders(query: string, onlyIds?: string[]): Promise<SearchResult[]> {
+export interface ProviderSearchError {
+  provider: string;
+  code: 'NEED_LOGIN' | 'UNAVAILABLE' | 'ERROR';
+  message: string;
+}
+
+// Поиск сразу по нескольким провайдерам; ошибка одного не роняет остальные,
+// но возвращается отдельно — клиент покажет «войдите» или «источник недоступен».
+export async function searchProviders(
+  query: string,
+  onlyIds?: string[],
+): Promise<{ results: SearchResult[]; errors: ProviderSearchError[] }> {
   const rows = listProviders().filter(
     (p) => p.enabled && (!onlyIds || onlyIds.includes(p.id))
   );
@@ -47,5 +59,15 @@ export async function searchProviders(query: string, onlyIds?: string[]): Promis
       return results.map((r) => ({ ...r, provider: r.provider || p.id }));
     })
   );
-  return settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : []));
+  const errors: ProviderSearchError[] = [];
+  settled.forEach((s, i) => {
+    if (s.status === 'fulfilled') return;
+    const e = s.reason;
+    errors.push({
+      provider: rows[i].id,
+      code: e instanceof ProviderError ? e.code : 'ERROR',
+      message: e instanceof Error ? e.message.slice(0, 300) : String(e),
+    });
+  });
+  return { results: settled.flatMap((s) => (s.status === 'fulfilled' ? s.value : [])), errors };
 }

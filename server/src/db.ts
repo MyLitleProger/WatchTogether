@@ -143,7 +143,7 @@ export interface RoomRow {
 
 export interface ProviderRow {
   id: string;
-  type: 'youtube' | 'lostfilm' | 'lordserial' | 'rutube' | 'custom';
+  type: 'youtube' | 'lostfilm' | 'lordserial' | 'rutube' | 'rutracker' | 'custom';
   name: string;
   config_json: string;
   enabled: number;
@@ -334,8 +334,22 @@ const LORDSERIAL_DEFAULTS = {
   loginPath: '/login',
 };
 
+const RUTRACKER_DEFAULTS = {
+  // Зеркала одного сайта; куки входа действуют на том домене, где выполнен вход.
+  mirrors: ['https://rutracker.org', 'https://rutracker.net'],
+  loginPath: '/forum/login.php',
+  configVersion: 1,
+};
+
 export function seedProviders() {
   const byId = new Map(listProviders().map((p) => [p.id, p]));
+  if (!byId.has('rutracker')) {
+    upsertProvider({
+      id: 'rutracker', type: 'rutracker', name: 'RuTracker',
+      config_json: JSON.stringify(RUTRACKER_DEFAULTS),
+      enabled: 1,
+    });
+  }
 
   if (!byId.has('youtube')) {
     upsertProvider({ id: 'youtube', type: 'youtube', name: 'YouTube', config_json: '{}', enabled: 1 });

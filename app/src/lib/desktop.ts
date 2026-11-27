@@ -33,6 +33,10 @@ export interface WtDesktop {
   ztJoin(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztLeave(networkId: string): Promise<{ ok: boolean; error?: string }>;
   ztDownload(): Promise<{ ok: boolean }>;
+  // Медиатека: системный диалог выбора папки.
+  pickFolder?(): Promise<{ ok: boolean; path?: string }>;
+  // RuTracker: magnet → торрент-клиент этого ПК (error: 'no-client' — клиент не установлен).
+  openMagnet?(magnet: string, title?: string): Promise<{ ok: boolean; error?: string }>;
   // Прокси для страниц трансляции: 'socks5://127.0.0.1:10808' или '' — выкл.
   setProxy(rules: string): Promise<{ ok: boolean; error?: string }>;
   // Автообновления из GitHub Releases.

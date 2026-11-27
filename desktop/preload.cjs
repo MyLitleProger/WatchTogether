@@ -31,6 +31,10 @@ contextBridge.exposeInMainWorld('wtDesktop', {
   ztJoin: (networkId) => ipcRenderer.invoke('wt:zt-join', { networkId }),
   ztLeave: (networkId) => ipcRenderer.invoke('wt:zt-leave', { networkId }),
   ztDownload: () => ipcRenderer.invoke('wt:zt-download'),
+  // Медиатека: системный диалог выбора папки (только на своём сервере).
+  pickFolder: () => ipcRenderer.invoke('wt:pick-folder'),
+  // RuTracker: открыть magnet-ссылку в торрент-клиенте этого ПК.
+  openMagnet: (magnet, title) => ipcRenderer.invoke('wt:open-magnet', { magnet, title }),
   // Прокси для страниц трансляции (YouTube и пр. через VPN с раздельным
   // туннелированием): 'socks5://127.0.0.1:10808' или '' — отключить.
   setProxy: (rules) => ipcRenderer.invoke('wt:set-proxy', { rules }),

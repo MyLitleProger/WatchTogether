@@ -1,6 +1,9 @@
-// Настройки источников: редактирование зеркал LostFilm и добавление своих сайтов.
+// Настройки источников: вход на сайты (RuTracker, LostFilm, LordSerial), зеркала,
+// включение/отключение и добавление своих сайтов.
 import { useEffect, useState } from 'react';
 import { api, type ProviderInfo } from '@/lib/api';
+import { getDesktop } from '@/lib/desktop';
+import { canLoginTo, loginToProvider } from '@/lib/providerLogin';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 
@@ -17,6 +20,18 @@ export function SettingsPanel() {
     const mirrors = mirrorsText.split('\n').map((s) => s.trim()).filter(Boolean);
     await api.saveProvider({ ...p, config: { ...p.config, mirrors } });
     setStatus(`Зеркала «${p.name}» сохранены`);
+    reload();
+  };
+
+  const login = async (p: ProviderInfo) => {
+    const res = await loginToProvider(p);
+    setStatus(res.message);
+    reload();
+  };
+
+  const logout = async (p: ProviderInfo) => {
+    await getDesktop()?.clearAuth(p.id);
+    setStatus(`Вход в «${p.name}» сброшен`);
     reload();
   };
 
@@ -73,7 +88,26 @@ export function SettingsPanel() {
             </div>
           </div>
 
-          {(p.type === 'lostfilm' || p.type === 'lordserial') && (
+          {canLoginTo(p) && (
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <span className={`rounded px-1.5 py-0.5 text-xs ${p.config.hasCookies ? 'bg-emerald-500/15 text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
+                {p.config.hasCookies ? 'Вход выполнен' : 'Вход не выполнен'}
+              </span>
+              <Button size="sm" variant="outline" onClick={() => login(p)}>
+                {p.config.hasCookies ? 'Войти заново' : 'Войти на сайте'}
+              </Button>
+              {!!p.config.hasCookies && getDesktop() && (
+                <Button size="sm" variant="ghost" onClick={() => logout(p)}>Выйти</Button>
+              )}
+              {p.type === 'rutracker' && (
+                <span className="w-full text-xs text-zinc-500">
+                  Без входа RuTracker не ищет. Раздачи открываются в вашем торрент-клиенте — добавьте его папку загрузок в медиатеку.
+                </span>
+              )}
+            </div>
+          )}
+
+          {(p.type === 'lostfilm' || p.type === 'lordserial' || p.type === 'rutracker') && (
             <div className="mt-3">
               <label className="mb-1 block text-xs text-zinc-400" htmlFor={`mirrors-${p.id}`}>
                 Зеркала (по одному на строку, перебираются по очереди)

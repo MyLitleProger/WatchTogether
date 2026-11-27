@@ -60,7 +60,7 @@ export interface RoomDetails extends Omit<RoomSummary, 'members'> {
 
 export interface ProviderInfo {
   id: string;
-  type: 'youtube' | 'lostfilm' | 'lordserial' | 'rutube' | 'custom';
+  type: 'youtube' | 'lostfilm' | 'lordserial' | 'rutube' | 'rutracker' | 'custom';
   name: string;
   enabled: boolean;
   config: Record<string, unknown>;
@@ -72,6 +72,39 @@ export interface SearchResult {
   url: string;
   thumbnail?: string;
   subtitle?: string;
+}
+
+// Ошибка отдельного источника при поиске: NEED_LOGIN → показать «Войти».
+export interface ProviderSearchError {
+  provider: string;
+  code: 'NEED_LOGIN' | 'UNAVAILABLE' | 'ERROR';
+  message: string;
+}
+
+// Медиатека: видеофайл из папок компьютера-хоста.
+export interface LibraryFile {
+  id: string;
+  name: string;
+  title: string;
+  dir: string;
+  folder: string;
+  size: number;
+  mtime: number;
+  playable: boolean;
+  ext: string;
+}
+
+export interface LibraryInfo {
+  files: LibraryFile[];
+  folders: { id: number; path: string; files?: number }[];
+  canManage: boolean; // папками управляет только сам хост (на этом ПК)
+  scanning: boolean;
+  scannedAt: number;
+}
+
+// Источник «файл медиатеки» для плеера и синхронизации комнаты.
+export function librarySource(f: LibraryFile): WatchSource {
+  return { kind: 'direct', url: `/api/library/stream/${f.id}`, title: f.title, provider: 'library' };
 }
 
 export interface SyncState {
@@ -140,7 +173,7 @@ export const api = {
     req<{ ok: true }>(`/api/providers/${p.id}`, { method: 'PUT', body: JSON.stringify(p) }),
   deleteProvider: (id: string) => req<{ ok: true }>(`/api/providers/${id}`, { method: 'DELETE' }),
   search: (q: string, providers?: string[]) =>
-    req<{ results: SearchResult[] }>(
+    req<{ results: SearchResult[]; errors?: ProviderSearchError[] }>(
       `/api/search?q=${encodeURIComponent(q)}${providers?.length ? `&providers=${providers.join(',')}` : ''}`
     ),
   discover: () => req<{ peers: { id?: string; name: string; httpPort: number; from: string; addresses?: string[] }[] }>('/api/discover'),
@@ -160,6 +193,15 @@ export const api = {
     ),
   rutubeSeason: (url: string) =>
     req<RutubeSeasonPack>(`/api/rutube/season?url=${encodeURIComponent(url)}`),
+  rutrackerTopic: (url: string) =>
+    req<{ title: string; magnet: string }>(`/api/rutracker/topic?url=${encodeURIComponent(url)}`),
+  library: () =>
+    req<LibraryInfo>('/api/library', { headers: { 'Content-Type': 'application/json', ...mediaTokenHeader() } }),
+  addLibraryFolder: (path: string) =>
+    req<{ ok: true }>('/api/library/folders', { method: 'POST', body: JSON.stringify({ path }) }),
+  removeLibraryFolder: (id: number) =>
+    req<{ ok: true }>(`/api/library/folders/${id}`, { method: 'DELETE' }),
+  scanLibrary: () => req<{ ok: true; scannedAt: number }>('/api/library/scan', { method: 'POST', body: '{}' }),
   roomHistory: (roomId: string) =>
     req<{ history: HistoryEntry[] }>(`/api/rooms/${roomId}/history`, {
       headers: { 'Content-Type': 'application/json', ...roomTokenHeader(roomId) },
@@ -183,10 +225,18 @@ export function setProxyToken(t: string | null | undefined) {
   proxyAccessToken = t || null;
 }
 
-// Добавляет токен к ссылкам на наш медиа-прокси (в т.ч. сохранённым в истории/очереди).
+// Добавляет токен к ссылкам на медиа-прокси и файлы медиатеки (в т.ч. сохранённым
+// в истории/очереди) — без него гости через интернет-туннель получат 403.
 export function withProxyToken(url: string): string {
-  if (!proxyAccessToken || !url.startsWith('/api/proxy/stream?') || /[?&]t=/.test(url)) return url;
-  return `${url}&t=${encodeURIComponent(proxyAccessToken)}`;
+  if (!proxyAccessToken || /[?&]t=/.test(url)) return url;
+  const t = encodeURIComponent(proxyAccessToken);
+  if (url.startsWith('/api/proxy/stream?')) return `${url}&t=${t}`;
+  if (url.startsWith('/api/library/stream/')) return `${url}?t=${t}`;
+  return url;
+}
+
+function mediaTokenHeader(): Record<string, string> {
+  return proxyAccessToken ? { 'X-Media-Token': proxyAccessToken } : {};
 }
 
 // Обёртка потока в серверный медиа-прокси (Referer + CORS + доступность для LAN).

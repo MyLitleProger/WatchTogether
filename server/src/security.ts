@@ -202,7 +202,7 @@ export function isMirrorUrl(url: string, hosts: Set<string>): boolean {
   }
 }
 
-export async function providerFetchText(
+export async function providerFetchPage(
   url: string,
   opts: {
     cookies?: string;
@@ -211,9 +211,10 @@ export async function providerFetchText(
     method?: string;
     body?: string;
     timeoutMs?: number;
+    encoding?: string; // кодировка страницы, если не UTF-8 (RuTracker — windows-1251)
   },
-): Promise<string> {
-  const { res } = await safeFetch(new URL(url), {
+): Promise<{ text: string; finalUrl: string }> {
+  const { res, finalUrl } = await safeFetch(new URL(url), {
     method: opts.method,
     body: opts.body,
     signal: AbortSignal.timeout(opts.timeoutMs ?? 9000),
@@ -223,7 +224,15 @@ export async function providerFetchText(
     }),
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return await res.text();
+  const text = opts.encoding
+    ? new TextDecoder(opts.encoding).decode(await res.arrayBuffer())
+    : await res.text();
+  // finalUrl (после редиректов) — по нему видно, что сайт отправил на страницу входа.
+  return { text, finalUrl: finalUrl.toString() };
+}
+
+export async function providerFetchText(...args: Parameters<typeof providerFetchPage>): Promise<string> {
+  return (await providerFetchPage(...args)).text;
 }
 
 // ─── Пароли комнат: scrypt с солью ───
@@ -325,8 +334,9 @@ export function cleanVideo(v: unknown): CleanVideo | null {
   const o = v as Record<string, unknown>;
   if (typeof o.kind !== 'string' || !VIDEO_KINDS.has(o.kind)) return null;
   if (typeof o.url !== 'string' || o.url.length > 4096) return null;
-  const isProxy = o.url.startsWith('/api/proxy/stream?');
-  if (!isProxy) {
+  // Свои ссылки сервера: медиа-прокси и файлы медиатеки этого ПК.
+  const isOwn = o.url.startsWith('/api/proxy/stream?') || /^\/api\/library\/stream\/[\w-]{1,64}$/.test(o.url);
+  if (!isOwn) {
     try {
       if (!/^https?:$/.test(new URL(o.url).protocol)) return null;
     } catch {

@@ -906,6 +906,33 @@ ipcMain.handle('wt:zt-download', () => {
   return { ok: true };
 });
 
+// ─── Медиатека: выбор папки с видео (только для своего сервера) ───
+handleLocalOnly('wt:pick-folder', async () => {
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const res = await dialog.showOpenDialog(parent, {
+    title: 'Папка с видео для медиатеки',
+    properties: ['openDirectory'],
+  });
+  return res.canceled || !res.filePaths[0] ? { ok: false } : { ok: true, path: res.filePaths[0] };
+});
+
+// ─── RuTracker: magnet-ссылка → торрент-клиент этого ПК ───
+// Только настоящие magnet-ссылки BitTorrent; с чужого сервера — с подтверждением.
+const MAGNET_RE = /^magnet:\?xt=urn:btih:[a-z0-9]{32,40}(&[^\s]*)?$/i;
+ipcMain.handle('wt:open-magnet', async (e, { magnet, title } = {}) => {
+  const m = String(magnet ?? '');
+  if (!MAGNET_RE.test(m) || m.length > 8192) return { ok: false, error: 'bad-magnet' };
+  const allowed = await confirmRemote(e, `magnet|${m.slice(20, 60)}`,
+    'Открыть раздачу в торрент-клиенте?', `Раздача: ${String(title ?? '').slice(0, 200) || 'без названия'}`);
+  if (!allowed) return { ok: false, error: 'denied' };
+  try {
+    await shell.openExternal(m);
+    return { ok: true };
+  } catch {
+    return { ok: false, error: 'no-client' };
+  }
+});
+
 app.on('window-all-closed', () => {
   quitting = true;
   closeStreamWindow();
