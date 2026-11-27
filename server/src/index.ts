@@ -5,7 +5,7 @@ import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { seedProviders } from './db.js';
+import { seedProviders, encryptStoredCookies } from './db.js';
 import { registerRoutes } from './rooms.js';
 import { setupSync } from './sync.js';
 import { startDiscoveryResponder, discoverPeers, localAddresses } from './discovery.js';
@@ -18,8 +18,9 @@ const CLIENT_DIST = process.env.WT_CLIENT_DIST ?? path.resolve(__dirname, '..', 
 
 async function main() {
   seedProviders();
+  encryptStoredCookies(); // куки старых версий → зашифрованы (если есть ключ от Electron)
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
 
   // CORS открыт только у /api/server-info (предпроверка «Подключиться» с чужого
   // origin) — см. rooms.ts. Глобальный «*» позволял любому сайту в браузере

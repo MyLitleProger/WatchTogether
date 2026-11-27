@@ -1,5 +1,6 @@
 // LostFilm: домен-зеркало и CSS-селекторы хранятся в конфиге провайдера (БД),
 // потому что официальные зеркала регулярно меняются. Список правится из UI.
+import { providerFetchText, mirrorHosts } from '../security.js';
 import * as cheerio from 'cheerio';
 import type { SearchResult } from './index.js';
 
@@ -13,22 +14,14 @@ interface LostFilmConfig {
   cookies?: string;         // куки сессии (из встроенного окна авторизации Electron)
 }
 
-async function fetchWithTimeout(url: string, timeoutMs = 8000, cookies?: string): Promise<string> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) WatchTogether/0.1',
-        ...(cookies ? { Cookie: cookies } : {}),
-      },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } finally {
-    clearTimeout(t);
-  }
+// Только публичные адреса; куки входа — только хостам зеркал (см. security.ts).
+async function fetchWithTimeout(url: string, timeoutMs = 8000, auth?: { cookies?: string; mirrors?: string[] }): Promise<string> {
+  return providerFetchText(url, {
+    timeoutMs,
+    cookies: auth?.cookies,
+    cookieHosts: mirrorHosts(auth?.mirrors),
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) WatchTogether/0.1' },
+  });
 }
 
 export async function searchLostFilm(query: string, raw: Record<string, unknown>): Promise<SearchResult[]> {
@@ -81,8 +74,7 @@ export interface EpisodeInfo {
 // поэтому догружаем страницы /series/<slug>/season_N/ для каждого сезона.
 export async function getSeriesEpisodes(seriesUrl: string, raw: Record<string, unknown>): Promise<EpisodeInfo[]> {
   const config = raw as unknown as LostFilmConfig;
-  const cookies = config.cookies;
-  const html = await fetchWithTimeout(seriesUrl, 8000, cookies);
+  const html = await fetchWithTimeout(seriesUrl, 8000, config);
   const mirrors = config.mirrors ?? [];
   const base = mirrors.find((m) => seriesUrl.startsWith(m)) ?? mirrors[0] ?? seriesUrl;
   const slugMatch = seriesUrl.match(/\/series\/([^/]+)\/?/);
@@ -108,7 +100,7 @@ export async function getSeriesEpisodes(seriesUrl: string, raw: Record<string, u
     // считаем «0 серий» ошибкой и повторяем с паузой.
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const pageHtml = pageUrl === seriesUrl ? html : await fetchWithTimeout(pageUrl, 8000, cookies);
+        const pageHtml = pageUrl === seriesUrl ? html : await fetchWithTimeout(pageUrl, 8000, config);
         const parsed = parseEpisodeTable(pageHtml, base, slug);
         if (parsed.length === 0) throw new Error('пустая выдача');
         for (const ep of parsed) {
@@ -201,8 +193,7 @@ export interface StreamInfo {
 }
 
 export async function getEpisodeStream(episodeUrl: string, raw?: Record<string, unknown>): Promise<StreamInfo> {
-  const cookies = (raw as LostFilmConfig | undefined)?.cookies;
-  const html = await fetchWithTimeout(episodeUrl, 8000, cookies);
+  const html = await fetchWithTimeout(episodeUrl, 8000, raw as LostFilmConfig | undefined);
   // 1) прямые ссылки на поток в разметке/скриптах
   const direct = html.match(/https?:\\?\/\\?\/[^\s"'\\]+\.(?:m3u8|mp4)(?:\?[^\s"'\\]*)?/i);
   if (direct) {

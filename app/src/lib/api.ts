@@ -129,10 +129,10 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   listRooms: () => req<RoomSummary[]>('/api/rooms'),
-  createRoom: (name: string, controlMode: 'all' | 'host', hostClientId: string, password?: string) =>
+  createRoom: (name: string, controlMode: 'all' | 'host', hostClientId: string, hostSecret: string, password?: string) =>
     req<{ id: string }>('/api/rooms', {
       method: 'POST',
-      body: JSON.stringify({ name, controlMode, hostClientId, password: password || undefined }),
+      body: JSON.stringify({ name, controlMode, hostClientId, hostSecret, password: password || undefined }),
     }),
   getRoom: (id: string) => req<RoomDetails>(`/api/rooms/${id}`),
   listProviders: () => req<ProviderInfo[]>('/api/providers'),
@@ -161,8 +161,20 @@ export const api = {
   rutubeSeason: (url: string) =>
     req<RutubeSeasonPack>(`/api/rutube/season?url=${encodeURIComponent(url)}`),
   roomHistory: (roomId: string) =>
-    req<{ history: HistoryEntry[] }>(`/api/rooms/${roomId}/history`),
+    req<{ history: HistoryEntry[] }>(`/api/rooms/${roomId}/history`, {
+      headers: { 'Content-Type': 'application/json', ...roomTokenHeader(roomId) },
+    }),
 };
+
+// Токены доступа к REST комнат с паролем (история и т.п.): выдаются при входе.
+const roomTokens = new Map<string, string>();
+export function setRoomToken(roomId: string, token: string | null | undefined) {
+  if (token) roomTokens.set(roomId, token);
+}
+function roomTokenHeader(roomId: string): Record<string, string> {
+  const t = roomTokens.get(roomId);
+  return t ? { 'X-Room-Token': t } : {};
+}
 
 // Токен медиа-прокси выдаётся сервером при входе в комнату. Из LAN прокси
 // работает и без него, а гостям через интернет-туннель он обязателен.

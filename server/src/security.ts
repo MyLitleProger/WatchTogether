@@ -144,22 +144,204 @@ const safeAgent = new Agent({
 
 // fetch для пользовательских URL: только публичные адреса, редиректы
 // проверяются на каждом шаге (иначе публичный URL мог бы увести на 127.0.0.1).
+// headers может быть функцией от URL текущего шага — так куки сайта не
+// уезжают вслед за редиректом на чужой домен.
 export async function safeFetch(
   url: URL,
-  init: { headers?: Record<string, string>; signal?: AbortSignal },
+  init: {
+    headers?: Record<string, string> | ((u: URL) => Record<string, string>);
+    signal?: AbortSignal;
+    method?: string;
+    body?: string;
+  },
   maxRedirects = 5,
 ): Promise<{ res: Response; finalUrl: URL }> {
   let current = url;
+  let method = init.method ?? 'GET';
+  let body = init.body;
   for (let i = 0; i <= maxRedirects; i++) {
     assertPublicUrl(current);
-    const res = await undiciFetch(current, { ...init, redirect: 'manual', dispatcher: safeAgent });
+    const headers = typeof init.headers === 'function' ? init.headers(current) : init.headers;
+    const res = await undiciFetch(current, {
+      method, body, headers, signal: init.signal, redirect: 'manual', dispatcher: safeAgent,
+    });
     const location = res.headers.get('location');
     if (res.status >= 300 && res.status < 400 && location) {
       await res.body?.cancel().catch(() => {});
       current = new URL(location, current);
+      // Как браузер: после 301/302/303 повтор — GET без тела.
+      if (res.status !== 307 && res.status !== 308) { method = 'GET'; body = undefined; }
       continue;
     }
     return { res, finalUrl: current };
   }
   throw new Error('Слишком много перенаправлений');
+}
+
+// ─── Запросы провайдеров (LostFilm, LordSerial) ───
+// URL страниц приходят от клиента, поэтому: только публичные адреса, и куки
+// входа на сайт прикладываются ТОЛЬКО к хостам зеркал этого провайдера.
+// Раньше куки уходили на любой присланный URL — их можно было увести.
+const normHost = (h: string) => h.toLowerCase().replace(/^www\./, '');
+
+export function mirrorHosts(mirrors: unknown): Set<string> {
+  const out = new Set<string>();
+  if (!Array.isArray(mirrors)) return out;
+  for (const m of mirrors) {
+    try { out.add(normHost(new URL(String(m)).hostname)); } catch { /* битое зеркало */ }
+  }
+  return out;
+}
+
+export function isMirrorUrl(url: string, hosts: Set<string>): boolean {
+  try {
+    const u = new URL(url);
+    return /^https?:$/.test(u.protocol) && hosts.has(normHost(u.hostname));
+  } catch {
+    return false;
+  }
+}
+
+export async function providerFetchText(
+  url: string,
+  opts: {
+    cookies?: string;
+    cookieHosts: Set<string>;
+    headers?: Record<string, string>;
+    method?: string;
+    body?: string;
+    timeoutMs?: number;
+  },
+): Promise<string> {
+  const { res } = await safeFetch(new URL(url), {
+    method: opts.method,
+    body: opts.body,
+    signal: AbortSignal.timeout(opts.timeoutMs ?? 9000),
+    headers: (u) => ({
+      ...(opts.headers ?? {}),
+      ...(opts.cookies && opts.cookieHosts.has(normHost(u.hostname)) ? { Cookie: opts.cookies } : {}),
+    }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return await res.text();
+}
+
+// ─── Пароли комнат: scrypt с солью ───
+// Формат: scrypt$<соль b64>$<хеш b64>. Старые хеши (голый sha256 hex)
+// принимаются и перехешируются при первом успешном входе.
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16);
+  const hash = crypto.scryptSync(password, salt, 32);
+  return `scrypt$${salt.toString('base64')}$${hash.toString('base64')}`;
+}
+
+export function verifyPassword(password: string, stored: string): { ok: boolean; needsRehash: boolean } {
+  if (stored.startsWith('scrypt$')) {
+    const [, saltB64, hashB64] = stored.split('$');
+    const expected = Buffer.from(hashB64 ?? '', 'base64');
+    const actual = crypto.scryptSync(password, Buffer.from(saltB64 ?? '', 'base64'), expected.length || 32);
+    return { ok: expected.length > 0 && crypto.timingSafeEqual(actual, expected), needsRehash: false };
+  }
+  if (/^[0-9a-f]{64}$/.test(stored)) {
+    const legacy = crypto.createHash('sha256').update(password).digest();
+    return { ok: crypto.timingSafeEqual(legacy, Buffer.from(stored, 'hex')), needsRehash: true };
+  }
+  return { ok: false, needsRehash: false };
+}
+
+// Токен доступа к REST комнаты с паролем (история, детали). Выдаётся при входе
+// через сокет; смена пароля делает старые токены недействительными.
+export function roomAccessToken(roomId: string, passwordHash: string | null): string {
+  return crypto.createHmac('sha256', proxySecret()).update(`room:${roomId}:${passwordHash ?? ''}`)
+    .digest('base64url').slice(0, 32);
+}
+
+export function hasRoomAccess(req: FastifyRequest, room: { id: string; password_hash: string | null }): boolean {
+  if (!room.password_hash) return true;
+  const t = req.headers['x-room-token'];
+  if (typeof t !== 'string') return false;
+  const a = Buffer.from(t);
+  const b = Buffer.from(roomAccessToken(room.id, room.password_hash));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// ─── Подтверждение владения clientId ───
+// clientId виден всем в комнате (присутствие, сигналинг), поэтому сам по себе
+// не доказывает «я хост». Клиент хранит случайный секрет; сервер запоминает
+// его хеш при первом появлении clientId и дальше сверяет.
+const sha256 = (s: string) => crypto.createHash('sha256').update(s).digest('hex');
+
+export function verifyClient(
+  clientId: unknown,
+  secret: unknown,
+  store: { get(id: string): string | undefined; add(id: string, hash: string): void },
+): boolean {
+  if (typeof clientId !== 'string' || !/^[\w-]{8,64}$/.test(clientId)) return false;
+  if (typeof secret !== 'string' || secret.length < 16 || secret.length > 128) return false;
+  const known = store.get(clientId);
+  const hash = sha256(secret);
+  if (!known) {
+    store.add(clientId, hash);
+    return store.get(clientId) === hash; // гонка двух первых входов — выигрывает один
+  }
+  return crypto.timingSafeEqual(Buffer.from(known), Buffer.from(hash));
+}
+
+// ─── Ограничение частоты (token bucket) ───
+export class RateLimiter {
+  private buckets = new Map<string, { tokens: number; ts: number }>();
+  constructor(private perSec: number, private burst: number) {}
+
+  take(key: string): boolean {
+    const now = Date.now();
+    const b = this.buckets.get(key) ?? { tokens: this.burst, ts: now };
+    b.tokens = Math.min(this.burst, b.tokens + ((now - b.ts) / 1000) * this.perSec);
+    b.ts = now;
+    if (b.tokens < 1) { this.buckets.set(key, b); return false; }
+    b.tokens -= 1;
+    this.buckets.set(key, b);
+    if (this.buckets.size > 10000) this.prune(now);
+    return true;
+  }
+
+  forget(prefix: string) {
+    for (const k of this.buckets.keys()) if (k.startsWith(prefix)) this.buckets.delete(k);
+  }
+
+  private prune(now: number) {
+    for (const [k, b] of this.buckets) if (now - b.ts > 600000) this.buckets.delete(k);
+  }
+}
+
+// ─── Проверка входных данных ───
+const VIDEO_KINDS = new Set(['direct', 'youtube', 'embed', 'rutube', 'stream']);
+
+export interface CleanVideo { kind: string; url: string; title?: string; provider?: string }
+
+// Видео от клиента: известный kind, http(s)-ссылка или наш прокси, ограниченные длины.
+// Лишние поля отбрасываются.
+export function cleanVideo(v: unknown): CleanVideo | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (typeof o.kind !== 'string' || !VIDEO_KINDS.has(o.kind)) return null;
+  if (typeof o.url !== 'string' || o.url.length > 4096) return null;
+  const isProxy = o.url.startsWith('/api/proxy/stream?');
+  if (!isProxy) {
+    try {
+      if (!/^https?:$/.test(new URL(o.url).protocol)) return null;
+    } catch {
+      return null;
+    }
+  }
+  const out: CleanVideo = { kind: o.kind, url: o.url };
+  if (typeof o.title === 'string') out.title = o.title.slice(0, 300);
+  if (typeof o.provider === 'string') out.provider = o.provider.slice(0, 50);
+  return out;
+}
+
+// Позиция воспроизведения: конечное число в разумных пределах (до ~11 суток).
+export function cleanPosition(x: unknown): number {
+  const n = Number(x);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(Math.max(0, n), 1_000_000);
 }

@@ -629,11 +629,12 @@ export default function Room() {
     return <Navigate to="/" replace />;
   }
 
-  if (sync.error === 'NEED_PASSWORD' || sync.error === 'WRONG_PASSWORD') {
+  if (sync.error === 'NEED_PASSWORD' || sync.error === 'WRONG_PASSWORD' || sync.error === 'TOO_MANY_ATTEMPTS') {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-4 px-4">
         <h1 className="text-lg font-semibold text-zinc-100">Комната защищена паролем</h1>
         {sync.error === 'WRONG_PASSWORD' && <p className="text-sm text-red-400">Неверный пароль, попробуйте ещё раз</p>}
+        {sync.error === 'TOO_MANY_ATTEMPTS' && <p className="text-sm text-red-400">Слишком много неверных попыток — подождите несколько минут</p>}
         <div className="flex w-full max-w-xs gap-2">
           <Input
             type="password"

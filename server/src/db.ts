@@ -3,6 +3,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { encryptSecret, decryptSecret, isEncrypted, secretEncryptionEnabled } from './secretbox.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DB_PATH = process.env.WT_DB_PATH ?? path.join(__dirname, '..', 'watchtogether.db');
@@ -73,12 +74,48 @@ CREATE TABLE IF NOT EXISTS history (
 );
 CREATE INDEX IF NOT EXISTS idx_history_room ON history (room_id, updated_at);
 
+-- Устройства участников: clientId публичен (виден в комнате), поэтому
+-- владение им подтверждается секретом. Первый пришедший с clientId «занимает» его.
+CREATE TABLE IF NOT EXISTS clients (
+  client_id TEXT PRIMARY KEY,
+  secret_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
 -- Служебные настройки сервера (секреты и т.п.), ключ → значение.
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
 `);
+
+// Однократно шифруем куки, сохранённые старыми версиями открытым текстом.
+export function encryptStoredCookies() {
+  if (!secretEncryptionEnabled) return;
+  const raw = db.prepare(`SELECT * FROM providers`).all() as unknown as ProviderRow[];
+  for (const row of raw) {
+    const cfg = JSON.parse(row.config_json) as Record<string, unknown>;
+    if (typeof cfg.cookies === 'string' && cfg.cookies && !isEncrypted(cfg.cookies)) upsertProvider(row);
+  }
+}
+
+export function getClientSecretHash(clientId: string): string | undefined {
+  const row = db.prepare(`SELECT secret_hash FROM clients WHERE client_id = ?`).get(clientId) as { secret_hash: string } | undefined;
+  return row?.secret_hash;
+}
+
+export function addClient(clientId: string, secretHash: string) {
+  db.prepare(`INSERT OR IGNORE INTO clients (client_id, secret_hash, created_at) VALUES (?, ?, ?)`)
+    .run(clientId, secretHash, Date.now());
+}
+
+export function setRoomPasswordHash(roomId: string, hash: string) {
+  db.prepare(`UPDATE rooms SET password_hash = ? WHERE id = ?`).run(hash, roomId);
+}
+
+export function queueCount(roomId: string): number {
+  return (db.prepare(`SELECT COUNT(*) AS n FROM queue WHERE room_id = ?`).get(roomId) as { n: number }).n;
+}
 
 export function getSetting(key: string): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
@@ -158,11 +195,25 @@ export function listMembers(roomId: string): { client_id: string; nickname: stri
 }
 
 // --- провайдеры (источники контента, редактируемые пользователем) ---
+// Куки сессий в config_json хранятся зашифрованными (secretbox); снаружи этих
+// функций весь код видит обычный текст.
+function mapCookies(configJson: string, fn: (v: string) => string | null): string {
+  let cfg: Record<string, unknown>;
+  try { cfg = JSON.parse(configJson); } catch { return configJson; }
+  if (typeof cfg.cookies !== 'string' || !cfg.cookies) return configJson;
+  const next = fn(cfg.cookies);
+  if (next === null) delete cfg.cookies; // не расшифровать (ключ сменился) — как будто входа не было
+  else cfg.cookies = next;
+  return JSON.stringify(cfg);
+}
+
 export function listProviders(): ProviderRow[] {
-  return db.prepare(`SELECT * FROM providers ORDER BY name`).all() as unknown as ProviderRow[];
+  const rows = db.prepare(`SELECT * FROM providers ORDER BY name`).all() as unknown as ProviderRow[];
+  return rows.map((r) => ({ ...r, config_json: mapCookies(r.config_json, decryptSecret) }));
 }
 
 export function upsertProvider(p: ProviderRow) {
+  p = { ...p, config_json: mapCookies(p.config_json, encryptSecret) };
   db.prepare(
     `INSERT INTO providers (id, type, name, config_json, enabled) VALUES (?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET type = excluded.type, name = excluded.name,

@@ -27,6 +27,20 @@ export function getClientId(): string {
   return id;
 }
 
+// Секрет устройства: clientId виден всем в комнате, а секрет — нет. Сервер
+// запоминает его при первом появлении clientId, и выдать себя за другого
+// участника (например, за хоста) по одному clientId больше нельзя.
+const KEY_SECRET = 'wt.clientSecret';
+
+export function getClientSecret(): string {
+  let s = localStorage.getItem(KEY_SECRET);
+  if (!s) {
+    s = (uuid() + uuid()).replace(/-/g, '');
+    localStorage.setItem(KEY_SECRET, s);
+  }
+  return s;
+}
+
 export function getNickname(): string {
   return localStorage.getItem(KEY_NICK) ?? '';
 }

@@ -2,7 +2,7 @@
 // Поднимает встроенный сервер (Node внутри Electron через ELECTRON_RUN_AS_NODE)
 // и открывает окно с клиентом. В packaged-режиме БД лежит в userData —
 // комнаты и позиции переживают обновления установщика.
-const { app, BrowserWindow, shell, ipcMain, session, desktopCapturer, dialog } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, session, desktopCapturer, dialog, safeStorage } = require('electron');
 const { spawn, execFile } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
@@ -95,7 +95,33 @@ function resolvePaths() {
   };
 }
 
+// Ключ шифрования секретов в БД сервера (куки сайтов-провайдеров).
+// Сам ключ лежит в userData зашифрованным safeStorage (DPAPI — привязан к
+// учётной записи Windows), серверу передаётся через переменную окружения.
+let secretKeyCache;
+function serverSecretKey() {
+  if (secretKeyCache !== undefined) return secretKeyCache;
+  secretKeyCache = null;
+  try {
+    if (!safeStorage.isEncryptionAvailable()) return null;
+    const file = path.join(app.getPath('userData'), 'wt-secret.key');
+    if (fs.existsSync(file)) {
+      secretKeyCache = safeStorage.decryptString(fs.readFileSync(file));
+    } else {
+      const key = require('node:crypto').randomBytes(32).toString('base64');
+      fs.writeFileSync(file, safeStorage.encryptString(key));
+      secretKeyCache = key;
+    }
+  } catch (err) {
+    // Файл ключа испорчен или от другой учётной записи — не перезаписываем его,
+    // просто работаем без шифрования (сохранённые входы на сайты придётся повторить).
+    console.error('[secret] ключ шифрования недоступен:', err?.message ?? err);
+  }
+  return secretKeyCache;
+}
+
 function startServer(p) {
+  const secretKey = serverSecretKey();
   serverProcess = spawn(process.execPath, [p.serverEntry], {
     cwd: p.serverCwd,
     env: {
@@ -104,6 +130,7 @@ function startServer(p) {
       WT_PORT: String(PORT),
       WT_CLIENT_DIST: p.clientDist,
       WT_DB_PATH: p.dbPath,
+      ...(secretKey ? { WT_SECRET_KEY: secretKey } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

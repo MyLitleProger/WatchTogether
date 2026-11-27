@@ -1,8 +1,8 @@
 // Хук синхронизации комнаты: join, приём sync:state, отправка play/pause/seek, heartbeat, очередь.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { connectSocket, type ChatMessage, type MemberPresence, type QueueItem, type StreamInfo, type SyncState, type WatchSource, setProxyToken } from '@/lib/api';
-import { getClientId } from '@/lib/identity';
+import { connectSocket, type ChatMessage, type MemberPresence, type QueueItem, type StreamInfo, type SyncState, type WatchSource, setProxyToken, setRoomToken } from '@/lib/api';
+import { getClientId, getClientSecret } from '@/lib/identity';
 
 export interface RoomMeta {
   id: string;
@@ -33,13 +33,16 @@ export function useRoomSync(roomId: string, nickname: string, password?: string)
     socket.on('connect', () => {
       socket.emit(
         'room:join',
-        { roomId, clientId: getClientId(), nickname, password },
-        (res: { error?: string; ok?: boolean; snapshot?: SyncState; room?: RoomMeta; chat?: ChatMessage[]; queue?: QueueItem[]; stream?: StreamInfo; proxyToken?: string }) => {
+        { roomId, clientId: getClientId(), clientSecret: getClientSecret(), nickname, password },
+        (res: { error?: string; ok?: boolean; snapshot?: SyncState; room?: RoomMeta; chat?: ChatMessage[]; queue?: QueueItem[]; stream?: StreamInfo; proxyToken?: string; roomToken?: string }) => {
           if (res.error || !res.ok) {
-            setError(res.error ?? 'Не удалось войти в комнату');
+            setError(res.error === 'CLIENT_MISMATCH'
+              ? 'Сервер не узнал это устройство (его идентификатор уже занят другим). Очистите данные сайта или откройте комнату в другом браузере.'
+              : res.error ?? 'Не удалось войти в комнату');
             return;
           }
           setProxyToken(res.proxyToken);
+          setRoomToken(roomId, res.roomToken);
           setConnected(true);
           setError(null);
           if (res.room) setRoom(res.room);

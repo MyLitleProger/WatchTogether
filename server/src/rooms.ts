@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import {
   createRoom, getRoom, listRooms, listMembers,
   listProviders, upsertProvider, deleteProvider, db, historyList,
+  getClientSecretHash, addClient,
 } from './db.js';
 import { searchProviders } from './providers/index.js';
 import { getSeriesEpisodes, getEpisodeStream } from './providers/lostfilm.js';
@@ -14,6 +15,7 @@ import { APP_VERSION } from './version.js';
 import { deviceName, localAddresses, INSTANCE_ID } from './discovery.js';
 import {
   classifyRequest, requireAccess, isValidProxyToken, proxyToken, safeFetch, SsrfError,
+  hashPassword, hasRoomAccess, verifyClient, mirrorHosts, isMirrorUrl,
 } from './security.js';
 
 const newId = (len = 8) => crypto.randomBytes(len).toString('base64url').slice(0, len);
@@ -40,9 +42,10 @@ export async function registerRoutes(app: FastifyInstance) {
       name: r.name,
       controlMode: r.control_mode,
       hasPassword: !!r.password_hash,
-      video: r.current_video_json ? JSON.parse(r.current_video_json) : null,
-      positionSec: r.position_sec,
-      state: r.state,
+      // Что смотрят в комнате с паролем — видно только вошедшим.
+      video: !r.password_hash && r.current_video_json ? JSON.parse(r.current_video_json) : null,
+      positionSec: r.password_hash ? 0 : r.position_sec,
+      state: r.password_hash ? 'paused' : r.state,
       updatedAt: r.updated_at,
       members: listMembers(r.id).length,
     }))
@@ -50,19 +53,26 @@ export async function registerRoutes(app: FastifyInstance) {
 
   app.post('/api/rooms', async (req, reply) => {
     const body = (req.body ?? {}) as {
-      name?: string; password?: string; controlMode?: 'all' | 'host'; hostClientId?: string;
+      name?: string; password?: string; controlMode?: 'all' | 'host'; hostClientId?: string; hostSecret?: string;
     };
-    const name = (body.name ?? '').trim();
+    const name = String(body.name ?? '').trim().slice(0, 100);
     if (!name) return reply.code(400).send({ error: 'Укажите название комнаты' });
+    const password = typeof body.password === 'string' ? body.password.slice(0, 200) : '';
+    // Хостом становится только тот, кто доказал владение clientId секретом.
+    const hostOk = !!body.hostClientId
+      && verifyClient(body.hostClientId, body.hostSecret, { get: getClientSecretHash, add: addClient });
+    if (body.controlMode === 'host' && !hostOk) {
+      return reply.code(400).send({ error: 'Не удалось подтвердить устройство хоста' });
+    }
     const room = {
       id: newId(8),
       name,
-      password_hash: body.password ? crypto.createHash('sha256').update(body.password).digest('hex') : null,
+      password_hash: password ? hashPassword(password) : null,
       control_mode: body.controlMode === 'host' ? ('host' as const) : ('all' as const),
       current_video_json: null,
       position_sec: 0,
       state: 'paused' as const,
-      host_client_id: body.hostClientId ?? null,
+      host_client_id: hostOk ? body.hostClientId! : null,
       updated_at: Date.now(),
       created_at: Date.now(),
     };
@@ -74,6 +84,10 @@ export async function registerRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const room = getRoom(id);
     if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!hasRoomAccess(req, room)) {
+      // Без пароля — только публичная карточка комнаты.
+      return { id: room.id, name: room.name, controlMode: room.control_mode, hasPassword: true };
+    }
     return {
       id: room.id,
       name: room.name,
@@ -157,6 +171,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lostfilm/episodes', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url страницы сериала' });
+    if (!isMirrorUrl(url, mirrorHosts(lostfilmConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LostFilm из настроек источника' });
+    }
     try {
       const episodes = await getSeriesEpisodes(url, lostfilmConfig());
       return { episodes };
@@ -168,6 +185,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lostfilm/stream', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url серии' });
+    if (!isMirrorUrl(url, mirrorHosts(lostfilmConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LostFilm из настроек источника' });
+    }
     try {
       return await getEpisodeStream(url, lostfilmConfig());
     } catch (e) {
@@ -184,6 +204,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lordserial/episodes', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url страницы сериала' });
+    if (!isMirrorUrl(url, mirrorHosts(lordserialConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LordSerial из настроек источника' });
+    }
     try {
       const episodes = await getLordSerialEpisodes(url, lordserialConfig());
       return { episodes };
@@ -195,6 +218,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lordserial/stream', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url серии' });
+    if (!isMirrorUrl(url, mirrorHosts(lordserialConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LordSerial из настроек источника' });
+    }
     try {
       return await getLordSerialStream(url, lordserialConfig());
     } catch (e) {
@@ -225,8 +251,11 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   // --- история просмотра комнаты ---
-  app.get('/api/rooms/:id/history', async (req) => {
+  app.get('/api/rooms/:id/history', async (req, reply) => {
     const { id } = req.params as { id: string };
+    const room = getRoom(id);
+    if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!hasRoomAccess(req, room)) return reply.code(403).send({ error: 'Нужен пароль комнаты' });
     return {
       history: historyList(id).map((h) => ({
         video: JSON.parse(h.video_json),
@@ -241,6 +270,7 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/search', async (req, reply) => {
     const { q, providers } = req.query as { q?: string; providers?: string };
     if (!q?.trim()) return reply.code(400).send({ error: 'Пустой запрос' });
+    if (q.length > 200) return reply.code(400).send({ error: 'Слишком длинный запрос' });
     const ids = providers ? providers.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     const results = await searchProviders(q.trim(), ids);
     return { results };
