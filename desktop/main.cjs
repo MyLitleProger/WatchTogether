@@ -781,8 +781,10 @@ function setupAutoUpdate() {
     console.error('[update] electron-updater недоступен:', e?.message ?? e);
     return;
   }
+  // Скачиваем в фоне, а ставим только по кнопке «Обновить и перезапустить»:
+  // без согласия пользователя обновление не устанавливается (и при выходе тоже).
   autoUpdater.autoDownload = true;
-  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.on('checking-for-update', () => {
     if (updateState.status === 'idle') { updateState = { status: 'checking', version: null }; }
   });
@@ -821,10 +823,18 @@ ipcMain.handle('wt:update-check', async () => {
   }
 });
 ipcMain.handle('wt:update-install', () => {
+  if (updateState.status !== 'ready') return { ok: false, error: 'not-ready' };
   try {
     const { autoUpdater } = require('electron-updater');
-    autoUpdater.quitAndInstall();
-  } catch { /* noop */ }
+    // Тихая установка: quitAndInstall() без аргументов запускает установщик NSIS
+    // с окнами мастера. (true, true) = ключ /S (без окон) + --force-run
+    // (приложение само запустится после установки, в тот же каталог).
+    quitting = true; // сервер гасим без автоперезапуска — его файлы будет заменять установщик
+    autoUpdater.quitAndInstall(true, true);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e?.message ?? String(e) };
+  }
 });
 
 // ─── ZeroTier (виртуальная LAN «как Hamachi») ───
