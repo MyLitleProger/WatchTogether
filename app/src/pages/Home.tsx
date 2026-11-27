@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { api, type RoomSummary } from '@/lib/api';
-import { getClientId, getNickname, setNickname } from '@/lib/identity';
+import { getClientId, getNickname, setNickname, getClientSecret } from '@/lib/identity';
 import { getDesktop } from '@/lib/desktop';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -145,7 +145,7 @@ export default function Home() {
     if (!nick.trim()) { setError('Сначала укажите ник'); return; }
     setNickname(nick);
     try {
-      const { id } = await api.createRoom(name, controlMode, getClientId(), newRoomPassword.trim() || undefined);
+      const { id } = await api.createRoom(name, controlMode, getClientId(), getClientSecret(), newRoomPassword.trim() || undefined);
       navigate(`/room/${id}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Не удалось создать комнату');

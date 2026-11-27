@@ -34,6 +34,10 @@ console.log('▶ Подготовка сервера (production-зависим�
 fs.rmSync(stage, { recursive: true, force: true });
 fs.mkdirSync(stage, { recursive: true });
 fs.copyFileSync(path.join(serverDir, 'package.json'), path.join(stage, 'package.json'));
+// Лок-файл — чтобы в установщик (и в сборку на GitHub) попали ровно те версии
+// зависимостей, что проверены локально, а не свежие из диапазонов package.json.
+const serverLock = path.join(serverDir, 'package-lock.json');
+if (fs.existsSync(serverLock)) fs.copyFileSync(serverLock, path.join(stage, 'package-lock.json'));
 fs.cpSync(path.join(serverDir, 'dist'), path.join(stage, 'dist'), { recursive: true });
 run('npm install --omit=dev (сервер, staging)',
   fs.existsSync(npmCli) ? realNode : 'npm',

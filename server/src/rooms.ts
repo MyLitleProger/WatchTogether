@@ -5,6 +5,7 @@ import { Readable } from 'node:stream';
 import {
   createRoom, getRoom, listRooms, listMembers,
   listProviders, upsertProvider, deleteProvider, db, historyList,
+  getClientSecretHash, addClient,
 } from './db.js';
 import { searchProviders } from './providers/index.js';
 import { getSeriesEpisodes, getEpisodeStream } from './providers/lostfilm.js';
@@ -12,19 +13,27 @@ import { getLordSerialEpisodes, getLordSerialStream } from './providers/lordseri
 import { getRutubeStream, getRutubeSeasonPack } from './providers/rutube.js';
 import { APP_VERSION } from './version.js';
 import { deviceName, localAddresses, INSTANCE_ID } from './discovery.js';
+import {
+  classifyRequest, requireAccess, isValidProxyToken, proxyToken, safeFetch, SsrfError,
+  hashPassword, hasRoomAccess, verifyClient, mirrorHosts, isMirrorUrl,
+} from './security.js';
 
 const newId = (len = 8) => crypto.randomBytes(len).toString('base64url').slice(0, len);
 
 export async function registerRoutes(app: FastifyInstance) {
   // Информация о сервере (для LAN-discovery, ссылок-приглашений и экрана подключения)
-  app.get('/api/server-info', async () => ({
+  app.get('/api/server-info', async (_req, reply) => {
+    // Единственная ручка с CORS: предпроверка «Подключиться» с чужого origin.
+    reply.header('Access-Control-Allow-Origin', '*');
+    return {
     name: 'WatchTogether',
     version: APP_VERSION,
     serverTime: Date.now(),
     deviceName: deviceName(),
     addresses: localAddresses(),
     id: INSTANCE_ID,
-  }));
+    };
+  });
 
   // --- комнаты ---
   app.get('/api/rooms', async () =>
@@ -33,9 +42,10 @@ export async function registerRoutes(app: FastifyInstance) {
       name: r.name,
       controlMode: r.control_mode,
       hasPassword: !!r.password_hash,
-      video: r.current_video_json ? JSON.parse(r.current_video_json) : null,
-      positionSec: r.position_sec,
-      state: r.state,
+      // Что смотрят в комнате с паролем — видно только вошедшим.
+      video: !r.password_hash && r.current_video_json ? JSON.parse(r.current_video_json) : null,
+      positionSec: r.password_hash ? 0 : r.position_sec,
+      state: r.password_hash ? 'paused' : r.state,
       updatedAt: r.updated_at,
       members: listMembers(r.id).length,
     }))
@@ -43,19 +53,26 @@ export async function registerRoutes(app: FastifyInstance) {
 
   app.post('/api/rooms', async (req, reply) => {
     const body = (req.body ?? {}) as {
-      name?: string; password?: string; controlMode?: 'all' | 'host'; hostClientId?: string;
+      name?: string; password?: string; controlMode?: 'all' | 'host'; hostClientId?: string; hostSecret?: string;
     };
-    const name = (body.name ?? '').trim();
+    const name = String(body.name ?? '').trim().slice(0, 100);
     if (!name) return reply.code(400).send({ error: 'Укажите название комнаты' });
+    const password = typeof body.password === 'string' ? body.password.slice(0, 200) : '';
+    // Хостом становится только тот, кто доказал владение clientId секретом.
+    const hostOk = !!body.hostClientId
+      && verifyClient(body.hostClientId, body.hostSecret, { get: getClientSecretHash, add: addClient });
+    if (body.controlMode === 'host' && !hostOk) {
+      return reply.code(400).send({ error: 'Не удалось подтвердить устройство хоста' });
+    }
     const room = {
       id: newId(8),
       name,
-      password_hash: body.password ? crypto.createHash('sha256').update(body.password).digest('hex') : null,
+      password_hash: password ? hashPassword(password) : null,
       control_mode: body.controlMode === 'host' ? ('host' as const) : ('all' as const),
       current_video_json: null,
       position_sec: 0,
       state: 'paused' as const,
-      host_client_id: body.hostClientId ?? null,
+      host_client_id: hostOk ? body.hostClientId! : null,
       updated_at: Date.now(),
       created_at: Date.now(),
     };
@@ -67,6 +84,10 @@ export async function registerRoutes(app: FastifyInstance) {
     const { id } = req.params as { id: string };
     const room = getRoom(id);
     if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!hasRoomAccess(req, room)) {
+      // Без пароля — только публичная карточка комнаты.
+      return { id: room.id, name: room.name, controlMode: room.control_mode, hasPassword: true };
+    }
     return {
       id: room.id,
       name: room.name,
@@ -80,7 +101,7 @@ export async function registerRoutes(app: FastifyInstance) {
     };
   });
 
-  app.delete('/api/rooms/:id', async (req) => {
+  app.delete('/api/rooms/:id', { preHandler: requireAccess('local', 'lan') }, async (req) => {
     const { id } = req.params as { id: string };
     db.prepare(`DELETE FROM members WHERE room_id = ?`).run(id);
     db.prepare(`DELETE FROM chat_messages WHERE room_id = ?`).run(id);
@@ -102,7 +123,7 @@ export async function registerRoutes(app: FastifyInstance) {
     })
   );
 
-  app.put('/api/providers/:id', async (req, reply) => {
+  app.put('/api/providers/:id', { preHandler: requireAccess('local') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { type?: string; name?: string; config?: object; enabled?: boolean };
     if (!body.name || !body.type) return reply.code(400).send({ error: 'Нужны name и type' });
@@ -124,7 +145,7 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   // Куки сессии из встроенного окна авторизации (Electron) — или сброс пустой строкой.
-  app.post('/api/providers/:id/cookies', async (req, reply) => {
+  app.post('/api/providers/:id/cookies', { preHandler: requireAccess('local') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { cookies } = (req.body ?? {}) as { cookies?: string };
     const row = listProviders().find((p) => p.id === id);
@@ -136,7 +157,7 @@ export async function registerRoutes(app: FastifyInstance) {
     return { ok: true, hasCookies: !!config.cookies };
   });
 
-  app.delete('/api/providers/:id', async (req) => {
+  app.delete('/api/providers/:id', { preHandler: requireAccess('local') }, async (req) => {
     deleteProvider((req.params as { id: string }).id);
     return { ok: true };
   });
@@ -150,6 +171,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lostfilm/episodes', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url страницы сериала' });
+    if (!isMirrorUrl(url, mirrorHosts(lostfilmConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LostFilm из настроек источника' });
+    }
     try {
       const episodes = await getSeriesEpisodes(url, lostfilmConfig());
       return { episodes };
@@ -161,6 +185,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lostfilm/stream', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url серии' });
+    if (!isMirrorUrl(url, mirrorHosts(lostfilmConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LostFilm из настроек источника' });
+    }
     try {
       return await getEpisodeStream(url, lostfilmConfig());
     } catch (e) {
@@ -177,6 +204,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lordserial/episodes', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url страницы сериала' });
+    if (!isMirrorUrl(url, mirrorHosts(lordserialConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LordSerial из настроек источника' });
+    }
     try {
       const episodes = await getLordSerialEpisodes(url, lordserialConfig());
       return { episodes };
@@ -188,6 +218,9 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/lordserial/stream', async (req, reply) => {
     const { url } = req.query as { url?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url серии' });
+    if (!isMirrorUrl(url, mirrorHosts(lordserialConfig().mirrors))) {
+      return reply.code(400).send({ error: 'Ссылка не на зеркало LordSerial из настроек источника' });
+    }
     try {
       return await getLordSerialStream(url, lordserialConfig());
     } catch (e) {
@@ -218,8 +251,11 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   // --- история просмотра комнаты ---
-  app.get('/api/rooms/:id/history', async (req) => {
+  app.get('/api/rooms/:id/history', async (req, reply) => {
     const { id } = req.params as { id: string };
+    const room = getRoom(id);
+    if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!hasRoomAccess(req, room)) return reply.code(403).send({ error: 'Нужен пароль комнаты' });
     return {
       history: historyList(id).map((h) => ({
         video: JSON.parse(h.video_json),
@@ -234,6 +270,7 @@ export async function registerRoutes(app: FastifyInstance) {
   app.get('/api/search', async (req, reply) => {
     const { q, providers } = req.query as { q?: string; providers?: string };
     if (!q?.trim()) return reply.code(400).send({ error: 'Пустой запрос' });
+    if (q.length > 200) return reply.code(400).send({ error: 'Слишком длинный запрос' });
     const ids = providers ? providers.split(',').map((s) => s.trim()).filter(Boolean) : undefined;
     const results = await searchProviders(q.trim(), ids);
     return { results };
@@ -244,8 +281,14 @@ export async function registerRoutes(app: FastifyInstance) {
   // CORS — гоняем через сервер: участникам в LAN видео доступно всегда,
   // а hls.js работает same-origin. m3u8 переписываем: сегменты тоже идут через прокси.
   app.get('/api/proxy/stream', async (req, reply) => {
-    const { url, referer } = req.query as { url?: string; referer?: string };
+    const { url, referer, t } = req.query as { url?: string; referer?: string; t?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url' });
+    // Из интернета (туннель) прокси работает только с токеном участника комнаты —
+    // иначе это открытый прокси, который ходит в сеть с вашего домашнего IP.
+    const hasToken = isValidProxyToken(t);
+    if (!hasToken && classifyRequest(req) === 'public') {
+      return reply.code(403).send({ error: 'Нужен токен доступа (войдите в комнату)' });
+    }
 
     let target: URL;
     try {
@@ -253,26 +296,26 @@ export async function registerRoutes(app: FastifyInstance) {
     } catch {
       return reply.code(400).send({ error: 'Некорректный url' });
     }
-    if (!/^https?:$/.test(target.protocol) || isPrivateHost(target.hostname)) {
-      return reply.code(403).send({ error: 'Этот адрес проксировать нельзя' });
-    }
 
     const range = req.headers.range;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 20000);
-    let upstream: Response;
+    let upstream: Awaited<ReturnType<typeof safeFetch>>['res'];
+    let finalUrl: URL;
     try {
-      upstream = await fetch(target, {
+      ({ res: upstream, finalUrl } = await safeFetch(target, {
         signal: ctrl.signal,
-        redirect: 'follow',
         headers: {
           'User-Agent': PROXY_UA,
           ...(referer ? { Referer: referer } : {}),
           ...(range ? { Range: range } : {}),
         },
-      });
+      }));
     } catch (e) {
       clearTimeout(timer);
+      if (e instanceof SsrfError || (e as { cause?: unknown })?.cause instanceof SsrfError) {
+        return reply.code(403).send({ error: 'Этот адрес проксировать нельзя' });
+      }
       return reply.code(502).send({ error: `Источник не ответил: ${e instanceof Error ? e.message : e}` });
     }
     clearTimeout(timer);
@@ -287,10 +330,10 @@ export async function registerRoutes(app: FastifyInstance) {
     // Плейлист: читаем целиком и переписываем ссылки на сегменты через прокси.
     if (isPlaylist) {
       const text = await upstream.text();
-      const base = upstream.url || target.toString();
+      const base = finalUrl.toString();
       reply.header('Content-Type', 'application/vnd.apple.mpegurl');
       reply.header('Cache-Control', 'no-cache');
-      return reply.send(rewriteM3U8(text, base, referer));
+      return reply.send(rewriteM3U8(text, base, referer, hasToken ? proxyToken() : undefined));
     }
 
     // Бинарный поток (mp4/ts/m4s): пробрасываем статус и заголовки диапазонов.
@@ -306,30 +349,15 @@ export async function registerRoutes(app: FastifyInstance) {
 
 const PROXY_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-// SSRF-защита: не проксируем локальные и приватные адреса (мы в LAN, порт открыт соседям).
-function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '::1' || h === '[::1]' || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-  }
-  return false;
-}
-
 // Перепись m3u8: URI сегментов/вариантов и URI="..." в атрибутах (ключи, аудио,
 // субтитры) заворачиваем в прокси; относительные ссылки резолвим от плейлиста.
-function rewriteM3U8(text: string, baseUrl: string, referer?: string): string {
+function rewriteM3U8(text: string, baseUrl: string, referer?: string, token?: string): string {
   const wrap = (u: string): string => {
     try {
       const abs = new URL(u, baseUrl).toString();
       let out = `/api/proxy/stream?url=${encodeURIComponent(abs)}`;
       if (referer) out += `&referer=${encodeURIComponent(referer)}`;
+      if (token) out += `&t=${token}`;
       return out;
     } catch {
       return u; // битая строка — оставляем как есть

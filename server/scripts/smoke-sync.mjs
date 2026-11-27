@@ -4,9 +4,14 @@ import { io } from '../../app/node_modules/socket.io-client/build/esm/index.js';
 
 const BASE = process.env.WT_BASE ?? 'http://localhost:9345';
 
+// clientId должен быть 8–64 символа и подтверждаться секретом устройства.
+const RUN = Date.now().toString(36);
+const ID = new Proxy({}, { get: (_, k) => `smoke-${String(k)}-${RUN}` });
+const SECRET = (id) => `secret-${id}-0123456789abcdef`;
+
 const mk = () => io(BASE, { transports: ['websocket'] });
 const join = (s, payload) =>
-  new Promise((res) => s.emit('room:join', payload, res));
+  new Promise((res) => s.emit('room:join', { clientSecret: SECRET(payload.clientId), ...payload }, res));
 const once = (s, ev, timeout = 3000) =>
   new Promise((res, rej) => {
     const t = setTimeout(() => rej(new Error(`timeout ${ev}`)), timeout);
@@ -19,13 +24,13 @@ const check = (name, ok) => { console.log(`${ok ? 'OK  ' : 'FAIL'} ${name}`); if
 // --- комната без пароля ---
 const r1 = await fetch(`${BASE}/api/rooms`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ name: 'Smoke v0.2', controlMode: 'all', hostClientId: 'a' }),
+  body: JSON.stringify({ name: 'Smoke v0.2', controlMode: 'all', hostClientId: ID.a, hostSecret: SECRET(ID.a) }),
 }).then((r) => r.json());
 
 const a = mk(), b = mk();
 await Promise.all([once(a, 'connect'), once(b, 'connect')]);
-const ja = await join(a, { roomId: r1.id, clientId: 'a', nickname: 'Алиса' });
-const jb = await join(b, { roomId: r1.id, clientId: 'b', nickname: 'Борис' });
+const ja = await join(a, { roomId: r1.id, clientId: ID.a, nickname: 'Алиса' });
+const jb = await join(b, { roomId: r1.id, clientId: ID.b, nickname: 'Борис' });
 check('join без пароля', ja.ok && jb.ok);
 
 // чат: история пустая, затем сообщение от A доходит до B и сохраняется
@@ -38,7 +43,7 @@ check('chat:message дошло', msg.text === 'Привет из смоук-те
 // переподключение → история в ack
 const c = mk();
 await once(c, 'connect');
-const jc = await join(c, { roomId: r1.id, clientId: 'c', nickname: 'Вера' });
+const jc = await join(c, { roomId: r1.id, clientId: ID.c, nickname: 'Вера' });
 check('история чата в join', jc.ok && jc.chat.length >= 1);
 
 // sync по-прежнему работает
@@ -52,18 +57,18 @@ check('sync:play', ps.state === 'playing' && ps.positionSec === 10
 // голосовая комната: список участников и адресный сигналинг
 a.emit('voice:join');
 const vp1 = await once(b, 'voice:peers');
-check('voice:join первого виден', vp1.peers.length === 1 && vp1.peers[0].clientId === 'a');
+check('voice:join первого виден', vp1.peers.length === 1 && vp1.peers[0].clientId === ID.a);
 b.emit('voice:join');
 const vp2 = await once(a, 'voice:peers');
 check('voice:peers оба участника', vp2.peers.length === 2);
 const sigWait = once(b, 'voice:signal');
-a.emit('voice:signal', { to: 'b', data: { description: { type: 'offer', sdp: 'x' } } });
+a.emit('voice:signal', { to: ID.b, data: { description: { type: 'offer', sdp: 'x' } } });
 const sig = await sigWait;
-check('voice:signal дошёл адресно', sig.from === 'a' && sig.data.description.type === 'offer');
+check('voice:signal дошёл адресно', sig.from === ID.a && sig.data.description.type === 'offer');
 const vp3 = once(a, 'voice:peers');
 b.emit('voice:leave');
 const afterLeave = await vp3;
-check('voice:leave убрал из списка', afterLeave.peers.length === 1 && afterLeave.peers[0].clientId === 'a');
+check('voice:leave убрал из списка', afterLeave.peers.length === 1 && afterLeave.peers[0].clientId === ID.a);
 
 // трансляция сайта: старт ведущего, ретрансляция сигналинга, гейтинг ввода
 const st1 = once(b, 'stream:state');
@@ -71,14 +76,14 @@ const sv1 = once(b, 'sync:state');
 a.emit('stream:start', { url: 'https://example.com/video', playerOnly: true });
 const streamState = await st1;
 const syncVideo = await sv1;
-check('stream:start активна', streamState.active === true && streamState.hostClientId === 'a' && streamState.playerOnly === true);
+check('stream:start активна', streamState.active === true && streamState.hostClientId === ID.a && streamState.playerOnly === true);
 check('stream: video в sync:state', syncVideo.video?.kind === 'stream' && syncVideo.video?.url === 'https://example.com/video');
 const w1 = once(a, 'stream:watch');
 b.emit('stream:watch');
-check('stream:watch дошёл ведущему', (await w1).from === 'b');
+check('stream:watch дошёл ведущему', (await w1).from === ID.b);
 const sg1 = once(a, 'stream:signal');
-b.emit('stream:signal', { to: 'a', data: { candidate: { candidate: 'x' } } });
-check('stream:signal зритель→ведущий', (await sg1).from === 'b');
+b.emit('stream:signal', { to: ID.a, data: { candidate: { candidate: 'x' } } });
+check('stream:signal зритель→ведущий', (await sg1).from === ID.b);
 let inputCame = false;
 a.on('stream:input', () => { inputCame = true; });
 b.emit('stream:input', { kind: 'click', x: 0.5, y: 0.5 });
@@ -99,22 +104,22 @@ a.close(); b.close(); c.close();
 // --- комната с паролем ---
 const r2 = await fetch(`${BASE}/api/rooms`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({ name: 'Секретная', controlMode: 'host', hostClientId: 'h', password: '1234' }),
+  body: JSON.stringify({ name: 'Секретная', controlMode: 'host', hostClientId: ID.h, hostSecret: SECRET(ID.h), password: '1234' }),
 }).then((r) => r.json());
 
 const d = mk();
 await once(d, 'connect');
-const noPw = await join(d, { roomId: r2.id, clientId: 'd', nickname: 'Дима' });
+const noPw = await join(d, { roomId: r2.id, clientId: ID.d, nickname: 'Дима' });
 check('без пароля → NEED_PASSWORD', noPw.error === 'NEED_PASSWORD');
-const badPw = await join(d, { roomId: r2.id, clientId: 'd', nickname: 'Дима', password: '0000' });
+const badPw = await join(d, { roomId: r2.id, clientId: ID.d, nickname: 'Дима', password: '0000' });
 check('неверный пароль → WRONG_PASSWORD', badPw.error === 'WRONG_PASSWORD');
-const okPw = await join(d, { roomId: r2.id, clientId: 'd', nickname: 'Дима', password: '1234' });
+const okPw = await join(d, { roomId: r2.id, clientId: ID.d, nickname: 'Дима', password: '1234' });
 check('верный пароль → вход', !!okPw.ok);
 
 // режим «только хост»: d не хост → его play игнорируется
 const e = mk();
 await once(e, 'connect');
-await join(e, { roomId: r2.id, clientId: 'h', nickname: 'Хост' });
+await join(e, { roomId: r2.id, clientId: ID.h, nickname: 'Хост' });
 let gotState = false;
 e.on('sync:state', () => { gotState = true; });
 d.emit('sync:play', { positionSec: 5 });

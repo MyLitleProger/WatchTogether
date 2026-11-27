@@ -5,7 +5,7 @@ import fastifyStatic from '@fastify/static';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { seedProviders } from './db.js';
+import { seedProviders, encryptStoredCookies } from './db.js';
 import { registerRoutes } from './rooms.js';
 import { setupSync } from './sync.js';
 import { startDiscoveryResponder, discoverPeers, localAddresses } from './discovery.js';
@@ -18,20 +18,13 @@ const CLIENT_DIST = process.env.WT_CLIENT_DIST ?? path.resolve(__dirname, '..', 
 
 async function main() {
   seedProviders();
+  encryptStoredCookies(); // куки старых версий → зашифрованы (если есть ключ от Electron)
 
-  const app = Fastify({ logger: false });
+  const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
 
-  // Клиент может ходить на чужой сервер со своего origin (предпроверка
-  // «Подключиться» на главной) — разрешаем CORS на чтение API. Сервер и так
-  // открыт в LAN, дополнительной поверхности атаки это не создаёт.
-  app.addHook('onSend', (_req, reply, _payload, done) => {
-    reply.header('Access-Control-Allow-Origin', '*');
-    reply.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    reply.header('Access-Control-Allow-Headers', 'Content-Type');
-    done();
-  });
-  app.options('/*', async (_req, reply) => reply.code(204).send());
-
+  // CORS открыт только у /api/server-info (предпроверка «Подключиться» с чужого
+  // origin) — см. rooms.ts. Глобальный «*» позволял любому сайту в браузере
+  // пользователя дёргать API localhost:9345.
   await registerRoutes(app);
 
   // Активный поиск других хостов в LAN (из UI «найти устройства»).

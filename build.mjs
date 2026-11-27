@@ -16,8 +16,10 @@ let failed = false;
 
 function run(label, cmd, args, cwd) {
   console.log(`\n▶ ${label}`);
-  // shell нужен для запуска npm.cmd на Windows; аргументы у нас фиксированные, инъекций нет.
-  const r = spawnSync(cmd, args, { cwd, stdio: 'inherit', shell: isWin });
+  // shell нужен только для npm.cmd на Windows (аргументы фиксированные, инъекций нет).
+  // Остальное (node.exe по пути с пробелом «C:/Program Files/nodejs») — без shell:
+  // через cmd путь разрывался на пробеле («C:/Program» не является командой).
+  const r = spawnSync(cmd, args, { cwd, stdio: 'inherit', shell: isWin && cmd === npm });
   if (r.status !== 0) {
     console.error(`✗ Шаг «${label}» завершился с кодом ${r.status}`);
     failed = true;

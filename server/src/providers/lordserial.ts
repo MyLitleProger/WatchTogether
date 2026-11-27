@@ -2,6 +2,7 @@
 // Поиск — стандартный DLE POST (do=search), серии размечены прямо в HTML
 // страницы сериала (#soons-tv-ajax), поток — best-effort из iframe плеера.
 // Список зеркал хранится в конфиге провайдера (БД) и правится из UI.
+import { providerFetchText, mirrorHosts } from '../security.js';
 import * as cheerio from 'cheerio';
 import type { SearchResult } from './index.js';
 import type { EpisodeInfo, StreamInfo } from './lostfilm.js';
@@ -17,20 +18,22 @@ interface LordSerialConfig {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-async function fetchWithTimeout(url: string, init?: RequestInit, timeoutMs = 9000, cookies?: string): Promise<string> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      ...init,
-      signal: ctrl.signal,
-      headers: { 'User-Agent': UA, ...(cookies ? { Cookie: cookies } : {}), ...(init?.headers ?? {}) },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    return await res.text();
-  } finally {
-    clearTimeout(t);
-  }
+// Только публичные адреса; куки входа — только хостам зеркал (не стороннему
+// плееру из iframe и не URL, присланному клиентом) — см. security.ts.
+async function fetchWithTimeout(
+  url: string,
+  init?: { method?: string; headers?: Record<string, string>; body?: string },
+  timeoutMs = 9000,
+  auth?: { cookies?: string; mirrors?: string[] },
+): Promise<string> {
+  return providerFetchText(url, {
+    method: init?.method,
+    body: init?.body,
+    timeoutMs,
+    cookies: auth?.cookies,
+    cookieHosts: mirrorHosts(auth?.mirrors),
+    headers: { 'User-Agent': UA, ...(init?.headers ?? {}) },
+  });
 }
 
 // Поиск по зеркалу: POST do=search&subaction=search&story=<запрос>.
@@ -87,7 +90,7 @@ export async function searchLordSerial(query: string, raw: Record<string, unknow
 // фрагмент нужен, чтобы эндпоинт потока знал сезон/серию.
 export async function getLordSerialEpisodes(seriesUrl: string, raw: Record<string, unknown>): Promise<EpisodeInfo[]> {
   const config = raw as unknown as LordSerialConfig;
-  const html = await fetchWithTimeout(seriesUrl, undefined, 9000, config.cookies);
+  const html = await fetchWithTimeout(seriesUrl, undefined, 9000, config);
   const $ = cheerio.load(html);
   const episodes: EpisodeInfo[] = [];
 
@@ -120,13 +123,13 @@ export async function getLordSerialEpisodes(seriesUrl: string, raw: Record<strin
 // плеера). Если плеер обфусцирован или регион заблокирован — честно возвращаем
 // pageUrl, клиент покажет ссылку на страницу серии.
 export async function getLordSerialStream(episodeUrl: string, raw?: Record<string, unknown>): Promise<StreamInfo> {
-  const cookies = (raw as LordSerialConfig | undefined)?.cookies;
+  const auth = raw as LordSerialConfig | undefined;
   const m = episodeUrl.match(/#s(\d+)e(\d+)$/);
   const seriesUrl = episodeUrl.replace(/#s\d+e\d+$/, '');
   const season = m?.[1] ?? '1';
   const episode = m?.[2] ?? '1';
 
-  const html = await fetchWithTimeout(seriesUrl, undefined, 9000, cookies);
+  const html = await fetchWithTimeout(seriesUrl, undefined, 9000, auth);
   const $ = cheerio.load(html);
   const iframeSrc = $('iframe[src*="season="]').first().attr('src');
   if (!iframeSrc) return { streamUrl: null, pageUrl: seriesUrl };
@@ -138,7 +141,7 @@ export async function getLordSerialStream(episodeUrl: string, raw?: Record<strin
   try {
     const playerHtml = await fetchWithTimeout(playerUrl.toString(), {
       headers: { Referer: seriesUrl },
-    }, 9000, cookies);
+    }, 9000, auth);
     const direct = playerHtml.match(/https?:\\?\/\\?\/[^\s"'\\]+\.(?:m3u8|mp4)(?:\?[^\s"'\\]*)?/i);
     if (direct) {
       return { streamUrl: direct[0].replaceAll('\\/', '/'), pageUrl: playerUrl.toString() };
