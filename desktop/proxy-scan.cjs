@@ -18,7 +18,27 @@ async function windowsProxySettings() {
   const enabled = /^0x1$/i.test(val('ProxyEnable'));
   const server = val('ProxyServer');
   const pac = val('AutoConfigURL');
-  return { enabled: enabled && !!server, server: server || null, pac: pac || null };
+  const override = val('ProxyOverride');
+  return { enabled: enabled && !!server, server: server || null, pac: pac || null, override: override || null };
+}
+
+// Частные сети: домашняя LAN, ZeroTier, Hamachi, Tailscale, link-local, IPv6 ULA.
+const PRIVATE_BYPASS = ['<local>', '*.local', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',
+  '169.254.0.0/16', '100.64.0.0/10', '25.0.0.0/8', '[fc00::]/7', '[fe80::]/10'];
+
+// Прокси для главного окна. Windows шлёт в прокси всё, кроме списка исключений, а
+// «<local>» там — только имена без точек: http://192.168.0.233 уходит в прокси (VPN-клиент),
+// который до домашней сети не достаёт, и подключение к другу молча висит.
+// Поэтому повторяем ручной прокси Windows, но частные адреса — всегда напрямую.
+// PAC-скрипт (AutoConfigURL) дополнить нельзя — тогда оставляем системный режим.
+function lanDirectProxyConfig(settings) {
+  if (!settings || settings.pac || !settings.enabled || !settings.server) return { mode: 'system' };
+  const own = String(settings.override ?? '').split(';').map((x) => x.trim()).filter(Boolean);
+  return {
+    mode: 'fixed_servers',
+    proxyRules: settings.server, // синтаксис Windows Chromium понимает как есть
+    proxyBypassRules: [...new Set([...own, ...PRIVATE_BYPASS])].join(','),
+  };
 }
 
 // «127.0.0.1:8080» или «http=127.0.0.1:8080;https=…;socks=…» → правило Chromium.
@@ -118,4 +138,4 @@ async function scanProxies(opts = {}) {
   };
 }
 
-module.exports = { scanProxies, windowsServerToRule };
+module.exports = { scanProxies, windowsServerToRule, windowsProxySettings, lanDirectProxyConfig };

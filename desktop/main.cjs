@@ -64,6 +64,20 @@ function handleLocalOnly(channel, handler, denied = { ok: false, error: 'forbidd
 
 // Частные адреса: домашняя сеть, ZeroTier/Hamachi/Tailscale. Только для них
 // принимается самоподписанный сертификат WatchTogether.
+let mainProxyKey = '';
+async function syncMainWindowProxy() {
+  if (process.platform !== 'win32') return;
+  try {
+    const { windowsProxySettings, lanDirectProxyConfig } = require('./proxy-scan.cjs');
+    const config = lanDirectProxyConfig(await windowsProxySettings());
+    const key = JSON.stringify(config);
+    if (key === mainProxyKey) return;
+    await session.defaultSession.setProxy(config);
+    await session.defaultSession.closeAllConnections().catch(() => {});
+    mainProxyKey = key;
+  } catch { /* остаёмся на системном прокси */ }
+}
+
 function isPrivateLanHost(host) {
   const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(String(host ?? ''));
   if (!m) return false;
@@ -232,6 +246,10 @@ app.whenReady().then(async () => {
   restrictPermissions(session.fromPartition(STREAM_PARTITION), SITE_PERMISSIONS);
   // Окно трансляции по умолчанию ходит в сеть как браузер — через системный прокси Windows.
   session.fromPartition(STREAM_PARTITION).setProxy({ mode: 'system' }).catch(() => {});
+  // Главное окно: как Windows, но компьютеры в локальной сети — всегда напрямую
+  // (иначе системный прокси/VPN глотает подключение к серверу друга).
+  syncMainWindowProxy();
+  setInterval(syncMainWindowProxy, 30_000).unref?.();
 
   // HTTPS серверов WatchTogether в локальной сети: у них самоподписанный сертификат
   // (иначе по http://192.168… браузер не даёт микрофон для голосового чата).
