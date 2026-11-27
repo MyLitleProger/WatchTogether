@@ -117,6 +117,25 @@ export function queueCount(roomId: string): number {
   return (db.prepare(`SELECT COUNT(*) AS n FROM queue WHERE room_id = ?`).get(roomId) as { n: number }).n;
 }
 
+// Миграция: «скрытая» комната (не показывается в общем списке).
+{
+  const cols = db.prepare(`PRAGMA table_info(rooms)`).all() as { name: string }[];
+  if (!cols.some((c) => c.name === 'hidden')) db.exec(`ALTER TABLE rooms ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0`);
+}
+
+export function updateRoomSettings(id: string, patch: { name?: string; password_hash?: string | null; hidden?: boolean }) {
+  if (patch.name !== undefined) db.prepare(`UPDATE rooms SET name = ? WHERE id = ?`).run(patch.name, id);
+  if (patch.password_hash !== undefined) db.prepare(`UPDATE rooms SET password_hash = ? WHERE id = ?`).run(patch.password_hash, id);
+  if (patch.hidden !== undefined) db.prepare(`UPDATE rooms SET hidden = ? WHERE id = ?`).run(patch.hidden ? 1 : 0, id);
+}
+
+export function deleteRoom(id: string) {
+  for (const t of ['members', 'chat_messages', 'queue', 'history']) {
+    db.prepare(`DELETE FROM ${t} WHERE room_id = ?`).run(id);
+  }
+  db.prepare(`DELETE FROM rooms WHERE id = ?`).run(id);
+}
+
 export function getSetting(key: string): string | undefined {
   const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
   return row?.value;
@@ -139,6 +158,7 @@ export interface RoomRow {
   host_client_id: string | null;
   updated_at: number;
   created_at: number;
+  hidden?: number;
 }
 
 export interface ProviderRow {
@@ -152,10 +172,10 @@ export interface ProviderRow {
 // --- комнаты ---
 export function createRoom(row: RoomRow) {
   db.prepare(
-    `INSERT INTO rooms (id, name, password_hash, control_mode, current_video_json, position_sec, state, host_client_id, updated_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO rooms (id, name, password_hash, control_mode, current_video_json, position_sec, state, host_client_id, updated_at, created_at, hidden)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(row.id, row.name, row.password_hash, row.control_mode, row.current_video_json,
-        row.position_sec, row.state, row.host_client_id, row.updated_at, row.created_at);
+        row.position_sec, row.state, row.host_client_id, row.updated_at, row.created_at, row.hidden ? 1 : 0);
 }
 
 export function getRoom(id: string): RoomRow | undefined {

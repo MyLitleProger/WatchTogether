@@ -6,6 +6,7 @@ import net from 'node:net';
 import type { FastifyReply, FastifyRequest } from 'fastify';
 import { Agent, fetch as undiciFetch, type Response } from 'undici';
 import { getSetting, setSetting } from './db.js';
+import { lanHttpsRemote } from './lan-https.js';
 
 // ─── Происхождение запроса ───
 // local  — этот компьютер (окно приложения, браузер на localhost);
@@ -39,7 +40,10 @@ function hostHeaderName(req: FastifyRequest): string {
 }
 
 export function classifyRequest(req: FastifyRequest): Access {
-  const ip = normalizeIp(req.socket.remoteAddress ?? '');
+  // Соединение через HTTPS-порт локальной сети приходит с 127.0.0.1 — берём
+  // настоящий адрес устройства, который запомнил TLS-сервер (lan-https.ts).
+  const viaHttps = lanHttpsRemote(req.socket.remotePort);
+  const ip = normalizeIp(viaHttps ?? req.socket.remoteAddress ?? '');
   const loopback = ip === '::1' || ip.startsWith('127.');
   if (loopback) return LOCAL_HOSTNAMES.has(hostHeaderName(req)) ? 'local' : 'public';
   const family = net.isIPv4(ip) ? 'ipv4' : net.isIPv6(ip) ? 'ipv6' : null;

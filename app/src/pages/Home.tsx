@@ -11,6 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { SettingsPanel } from '@/components/SettingsPanel';
 import { LibraryPanel } from '@/components/LibraryPanel';
+import { ProfileMenu } from '@/components/ProfileMenu';
 
 interface Peer { id?: string; name: string; httpPort: number; from: string; addresses?: string[] }
 type TabId = 'rooms' | 'library' | 'access' | 'sources';
@@ -66,20 +67,20 @@ export default function Home() {
   const navigate = useNavigate();
   const [nick, setNick] = useState(getNickname());
   const [nickDraft, setNickDraft] = useState('');
-  const [editingNick, setEditingNick] = useState(false);
   const [rooms, setRooms] = useState<RoomSummary[]>([]);
   const [roomsLoaded, setRoomsLoaded] = useState(false);
   const [newRoom, setNewRoom] = useState('');
   const [newRoomPassword, setNewRoomPassword] = useState('');
   const [controlMode, setControlMode] = useState<'all' | 'host'>('all');
   const [showRoomOptions, setShowRoomOptions] = useState(false);
+  const [newRoomHidden, setNewRoomHidden] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [host, setHost] = useState('');
   const [peers, setPeers] = useState<Peer[] | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const [tab, setTabState] = useState<TabId>(readTab);
   const [copied, setCopied] = useState<string | null>(null);
-  const [serverInfo, setServerInfo] = useState<{ deviceName?: string; addresses?: string[]; id?: string; version?: string } | null>(null);
+  const [serverInfo, setServerInfo] = useState<{ deviceName?: string; addresses?: string[]; id?: string; version?: string; httpsPort?: number | null } | null>(null);
   const [tunnel, setTunnel] = useState<{ active: boolean; url: string | null; provider?: string | null }>({ active: false, url: null });
   const [tunnelBusy, setTunnelBusy] = useState(false);
   const [tunnelError, setTunnelError] = useState<string | null>(null);
@@ -156,7 +157,6 @@ export default function Home() {
     if (!v) return;
     setNickname(v);
     setNick(v);
-    setEditingNick(false);
     setError(null);
   };
 
@@ -216,6 +216,7 @@ export default function Home() {
       const { id } = await api.createRoom(
         roomName.slice(0, 100), play ? 'all' : controlMode, getClientId(), getClientSecret(),
         play ? undefined : newRoomPassword.trim() || undefined,
+        play ? false : newRoomHidden,
       );
       navigate(`/room/${id}`, play ? { state: { play } } : undefined);
     } catch (e) {
@@ -248,8 +249,19 @@ export default function Home() {
       const res = await fetch(`${url}/api/server-info`, {
         signal: AbortSignal.any([ac.signal, AbortSignal.timeout(8000)]),
       });
-      const text = await res.text();
-      if (!res.ok || !text.includes('"WatchTogether"')) throw new Error('not-watchtogether');
+      const info = await res.json().catch(() => null) as { name?: string; httpsPort?: number | null } | null;
+      if (!res.ok || info?.name !== 'WatchTogether') throw new Error('not-watchtogether');
+      // Приложение сразу идёт на https-порт друга: только там работает микрофон
+      // (свой самоподписанный сертификат приложение принимает для адресов в локальной сети).
+      const target = new URL(url);
+      if (desktop && info.httpsPort && target.protocol === 'http:') {
+        const secure = new URL(target.toString());
+        secure.protocol = 'https:';
+        secure.port = String(info.httpsPort);
+        const ok = await fetch(`${secure.origin}/api/server-info`, { signal: AbortSignal.timeout(4000) })
+          .then((r) => r.ok).catch(() => false);
+        if (ok) { window.location.href = secure.origin; return; }
+      }
       window.location.href = url; // сервер жив — переходим на него целиком
     } catch (e) {
       if ((e as Error).name !== 'AbortError') {
@@ -281,6 +293,9 @@ export default function Home() {
 
   const port = location.port || (location.protocol === 'https:' ? '443' : '80');
   const lanLinks = (serverInfo?.addresses ?? []).map((a) => `http://${a}:${port}`);
+  const lanSecureLinks = serverInfo?.httpsPort
+    ? (serverInfo.addresses ?? []).map((a) => `https://${a}:${serverInfo.httpsPort}`)
+    : [];
   const playingNow = rooms.filter((r) => r.state === 'playing').length;
 
   const tabs: { id: TabId; label: string; hint?: string }[] = [
@@ -308,29 +323,13 @@ export default function Home() {
             {onRemoteHost ? `Сервер друга · ${location.host}` : `Этот компьютер · ${serverInfo?.deviceName ?? 'сервер'}`}
           </p>
         </div>
-        {nick && !editingNick && (
-          <button
-            type="button"
-            onClick={() => { setNickDraft(nick); setEditingNick(true); }}
-            className="ml-auto flex cursor-pointer items-center gap-2 rounded-full border border-zinc-800 bg-zinc-900 py-1 pl-1 pr-3 text-sm text-zinc-200 transition-colors hover:border-zinc-600"
-            title="Изменить имя"
-          >
-            <span className="flex h-7 w-7 items-center justify-center rounded-full bg-amber-500/20 text-xs font-semibold uppercase text-amber-300">
-              {nick.trim().slice(0, 1)}
-            </span>
-            {nick}
-          </button>
-        )}
-        {nick && editingNick && (
-          <div className="ml-auto flex gap-2">
-            <Input
-              autoFocus value={nickDraft} maxLength={32}
-              onChange={(e) => setNickDraft(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') saveNick(); if (e.key === 'Escape') setEditingNick(false); }}
-              aria-label="Ваше имя"
-              className="h-9 w-44"
+        {nick && (
+          <div className="ml-auto">
+            <ProfileMenu
+              nick={nick}
+              onNickChange={(v) => { setNickname(v); setNick(v); }}
+              serverVersion={serverInfo?.version}
             />
-            <Button size="sm" onClick={saveNick} disabled={!nickDraft.trim()}>Сохранить</Button>
           </div>
         )}
       </header>
@@ -409,7 +408,7 @@ export default function Home() {
               <path d="M9 6l6 6-6 6" />
             </svg>
             Пароль и кто управляет
-            {(controlMode === 'host' || newRoomPassword) && <span className="text-amber-400">· изменено</span>}
+            {(controlMode === 'host' || newRoomPassword || newRoomHidden) && <span className="text-amber-400">· изменено</span>}
           </button>
           {showRoomOptions && (
             <div className="mt-3 flex flex-col gap-3 rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
@@ -440,6 +439,14 @@ export default function Home() {
                   onKeyDown={(e) => e.key === 'Enter' && createRoom(newRoom)}
                   placeholder="Без пароля войдёт любой, у кого есть ссылка"
                 />
+              </label>
+              <label className="flex cursor-pointer items-start gap-2 text-xs text-zinc-400">
+                <input type="checkbox" className="mt-0.5 accent-amber-500" checked={newRoomHidden}
+                  onChange={(e) => setNewRoomHidden(e.target.checked)} />
+                <span>
+                  <span className="text-sm text-zinc-200">Скрыть из списка комнат</span><br />
+                  Другие не увидят её на главной — только по ссылке-приглашению.
+                </span>
               </label>
             </div>
           )}
@@ -540,6 +547,8 @@ export default function Home() {
                       >
                         <span className="flex items-center gap-2">
                           <span className="min-w-0 flex-1 truncate text-sm font-semibold text-zinc-100">{r.name}</span>
+                          {r.hidden && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] text-zinc-400">скрыта</span>}
+                          {r.isOwner && <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-300">моя</span>}
                           {r.hasPassword && <span className="text-zinc-500"><LockIcon /></span>}
                         </span>
                         <span className="line-clamp-2 min-h-8 text-xs text-zinc-400">
@@ -587,6 +596,22 @@ export default function Home() {
                       </li>
                     ))}
                   </ul>
+                )}
+                {lanSecureLinks.length > 0 && !onRemoteHost && (
+                  <div className="mt-1 flex flex-col gap-1.5 border-t border-zinc-800 pt-2">
+                    <p className="text-xs text-zinc-300">С голосовым чатом (браузер даёт микрофон только по https):</p>
+                    {lanSecureLinks.map((link) => (
+                      <div key={link} className="flex items-center gap-2">
+                        <code className="min-w-0 flex-1 break-all rounded-lg border border-emerald-500/20 bg-emerald-500/5 px-2.5 py-1.5 text-xs text-emerald-200">{link}</code>
+                        <Button size="sm" variant="outline" className="shrink-0" onClick={() => flashCopied(link, link)}>
+                          {copied === link ? 'Скопировано' : 'Копировать'}
+                        </Button>
+                      </div>
+                    ))}
+                    <p className="text-xs text-zinc-500">
+                      Браузер один раз предупредит, что сертификат не проверен, — это ваш компьютер, нажмите «Дополнительно» → «Перейти на сайт».
+                    </p>
+                  </div>
                 )}
                 {lanLinks.length > 1 && !onRemoteHost && (
                   <p className="text-xs text-zinc-500">Адресов несколько (Wi-Fi, кабель, VPN) — если первый не открылся, попробуйте следующий.</p>

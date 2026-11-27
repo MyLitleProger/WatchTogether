@@ -44,11 +44,22 @@ export interface WtDesktop {
   // Проверка выбора ('system' | 'direct' | 'socks5://…'): открывается ли YouTube и за сколько.
   proxyTest?(rules: string): Promise<{ ok: boolean; ms?: number; error?: string }>;
   // Автообновления из GitHub Releases.
-  updateStatus(): Promise<{ status: string; version: string | null }>;
+  updateStatus(): Promise<UpdateState>;
   updateCheck(): Promise<{ ok: boolean; error?: string }>;
   updateInstall(): Promise<void>;
   // Смена статуса обновления: idle | checking | downloading | ready | error.
-  onUpdate(cb: (s: { status: string; version: string | null }) => void): () => void;
+  onUpdate(cb: (s: UpdateState) => void): () => void;
+}
+
+// Состояние автообновления: idle → checking → latest | downloading(percent) → ready | error.
+export interface UpdateState {
+  status: 'idle' | 'checking' | 'latest' | 'downloading' | 'ready' | 'error' | string;
+  version: string | null;   // найденная (или текущая для latest) версия
+  checkedAt?: number;
+  percent?: number;
+  error?: string;
+  current?: string;         // установленная версия приложения
+  packaged?: boolean;       // false в режиме разработки — обновления выключены
 }
 
 export interface FoundProxy {

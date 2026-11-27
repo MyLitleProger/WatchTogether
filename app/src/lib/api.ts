@@ -2,6 +2,12 @@
 // Адрес сервера: по умолчанию текущий origin (клиент раздаётся самим сервером);
 // в dev — Vite проксирует /api и /socket.io на :9345; из UI можно указать другой хост.
 import { io, type Socket } from 'socket.io-client';
+import { getClientId, getClientSecret } from '@/lib/identity';
+
+// Кто я: для списка комнат (свои скрытые) и настроек своей комнаты.
+function identityHeaders(): Record<string, string> {
+  return { 'X-Client-Id': getClientId(), 'X-Client-Secret': getClientSecret() };
+}
 
 export interface WatchSource {
   kind: 'direct' | 'youtube' | 'embed' | 'rutube' | 'stream';
@@ -52,6 +58,8 @@ export interface RoomSummary {
   state: 'playing' | 'paused';
   updatedAt: number;
   members: number;
+  hidden?: boolean;   // скрыта из общего списка (видна создателю и компьютеру-хосту)
+  isOwner?: boolean;  // это моя комната
 }
 
 export interface RoomDetails extends Omit<RoomSummary, 'members'> {
@@ -140,6 +148,16 @@ export interface EpisodeInfo {
 }
 
 // База API: пустая строка = тот же origin (прод или Vite-прокси в dev).
+// Защищённая (https) версия текущей страницы на HTTPS-порту сервера — на ней браузер
+// разрешает микрофон. Имя переносим параметром: у https-адреса своё хранилище.
+export function secureVersionUrl(httpsPort: number, nick?: string): string {
+  const u = new URL(window.location.href);
+  u.protocol = 'https:';
+  u.port = String(httpsPort);
+  if (nick) u.searchParams.set('nick', nick);
+  return u.toString();
+}
+
 export function apiBase(): string {
   return sessionStorage.getItem('wt.apiBase') ?? '';
 }
@@ -161,12 +179,20 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  listRooms: () => req<RoomSummary[]>('/api/rooms'),
-  createRoom: (name: string, controlMode: 'all' | 'host', hostClientId: string, hostSecret: string, password?: string) =>
+  listRooms: () => req<RoomSummary[]>('/api/rooms', { headers: { 'Content-Type': 'application/json', ...identityHeaders() } }),
+  createRoom: (name: string, controlMode: 'all' | 'host', hostClientId: string, hostSecret: string, password?: string, hidden?: boolean) =>
     req<{ id: string }>('/api/rooms', {
       method: 'POST',
-      body: JSON.stringify({ name, controlMode, hostClientId, hostSecret, password: password || undefined }),
+      body: JSON.stringify({ name, controlMode, hostClientId, hostSecret, password: password || undefined, hidden: hidden || undefined }),
     }),
+  updateRoom: (id: string, patch: { name?: string; password?: string; hidden?: boolean }) =>
+    req<{ ok: true; name: string; hasPassword: boolean; hidden: boolean }>(`/api/rooms/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...identityHeaders() },
+      body: JSON.stringify(patch),
+    }),
+  deleteRoom: (id: string) =>
+    req<{ ok: true }>(`/api/rooms/${id}`, { method: 'DELETE', headers: identityHeaders() }),
   getRoom: (id: string) => req<RoomDetails>(`/api/rooms/${id}`),
   listProviders: () => req<ProviderInfo[]>('/api/providers'),
   saveProvider: (p: ProviderInfo) =>
@@ -178,7 +204,7 @@ export const api = {
     ),
   discover: () => req<{ peers: { id?: string; name: string; httpPort: number; from: string; addresses?: string[] }[] }>('/api/discover'),
   serverInfo: () =>
-    req<{ name: string; version: string; deviceName?: string; addresses?: string[]; id?: string }>('/api/server-info'),
+    req<{ name: string; version: string; deviceName?: string; addresses?: string[]; id?: string; httpsPort?: number | null }>('/api/server-info'),
   lostfilmEpisodes: (url: string) =>
     req<{ episodes: EpisodeInfo[] }>(`/api/lostfilm/episodes?url=${encodeURIComponent(url)}`),
   lostfilmStream: (url: string) =>

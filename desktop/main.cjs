@@ -62,6 +62,16 @@ function handleLocalOnly(channel, handler, denied = { ok: false, error: 'forbidd
   ipcMain.handle(channel, (e, ...args) => (isLocalSender(e) ? handler(e, ...args) : denied));
 }
 
+// Частные адреса: домашняя сеть, ZeroTier/Hamachi/Tailscale. Только для них
+// принимается самоподписанный сертификат WatchTogether.
+function isPrivateLanHost(host) {
+  const m = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(String(host ?? ''));
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return a === 10 || a === 25 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)
+    || (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254);
+}
+
 function isHttpUrl(u) {
   try { return /^https?:$/.test(new URL(String(u)).protocol); } catch { return false; }
 }
@@ -222,6 +232,19 @@ app.whenReady().then(async () => {
   restrictPermissions(session.fromPartition(STREAM_PARTITION), SITE_PERMISSIONS);
   // Окно трансляции по умолчанию ходит в сеть как браузер — через системный прокси Windows.
   session.fromPartition(STREAM_PARTITION).setProxy({ mode: 'system' }).catch(() => {});
+
+  // HTTPS серверов WatchTogether в локальной сети: у них самоподписанный сертификат
+  // (иначе по http://192.168… браузер не даёт микрофон для голосового чата).
+  // Принимаем его ТОЛЬКО для частных адресов (LAN, ZeroTier, Hamachi, Tailscale) и только
+  // если сертификат выписан на WatchTogether; всё остальное — обычная проверка Chromium.
+  session.defaultSession.setCertificateVerifyProc((request, callback) => {
+    const subject = String(request.certificate?.subjectName ?? '');
+    if (request.verificationResult !== 'net::OK' && isPrivateLanHost(request.hostname) && /WatchTogether/.test(subject)) {
+      callback(0);
+      return;
+    }
+    callback(-3); // решение Chromium по умолчанию
+  });
   restrictPermissions(session.fromPartition(AUTH_PARTITION), SITE_PERMISSIONS);
 
   // Захват окна трансляции: когда рендерер зовёт getDisplayMedia, отдаём ему
@@ -816,7 +839,7 @@ handleLocalOnly('wt:proxy-test', async (_e, { rules } = {}) => {
 // electron-updater смотрит latest.yml релиза MyLitleProger/WatchTogether:
 // свежая версия качается в фоне, UI получает событие и предлагает перезапуск.
 // Работает только в установленном приложении (в dev-режиме — молча выключено).
-let updateState = { status: 'idle', version: null };
+let updateState = { status: 'idle', version: null, checkedAt: 0 };
 
 function notifyUpdate() {
   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -837,23 +860,35 @@ function setupAutoUpdate() {
   // без согласия пользователя обновление не устанавливается (и при выходе тоже).
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = false;
+  // Статусы: idle → checking → latest (новее нет) | downloading → ready | error.
+  // checkedAt — когда последний раз проверяли (показывается в меню профиля).
   autoUpdater.on('checking-for-update', () => {
-    if (updateState.status === 'idle') { updateState = { status: 'checking', version: null }; }
+    if (updateState.status !== 'downloading' && updateState.status !== 'ready') {
+      updateState = { ...updateState, status: 'checking', version: null };
+      notifyUpdate();
+    }
   });
   autoUpdater.on('update-available', (info) => {
-    updateState = { status: 'downloading', version: info.version };
+    updateState = { status: 'downloading', version: info.version, checkedAt: Date.now() };
+    notifyUpdate();
+  });
+  autoUpdater.on('download-progress', (p) => {
+    updateState = { ...updateState, percent: Math.round(p.percent ?? 0) };
     notifyUpdate();
   });
   autoUpdater.on('update-not-available', () => {
-    if (updateState.status === 'checking') updateState = { status: 'idle', version: null };
+    updateState = { status: 'latest', version: app.getVersion(), checkedAt: Date.now() };
+    notifyUpdate();
   });
   autoUpdater.on('update-downloaded', (info) => {
-    updateState = { status: 'ready', version: info.version };
+    updateState = { status: 'ready', version: info.version, checkedAt: Date.now() };
     notifyUpdate();
   });
   autoUpdater.on('error', (e) => {
     console.error('[update]', e?.message ?? e);
-    updateState = { status: 'error', version: null };
+    // Ошибка фоновой проверки не должна прятать уже скачанное обновление.
+    if (updateState.status === 'ready') return;
+    updateState = { status: 'error', version: null, checkedAt: Date.now(), error: String(e?.message ?? e).slice(0, 200) };
     notifyUpdate();
   });
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
@@ -861,9 +896,14 @@ function setupAutoUpdate() {
   setInterval(check, 4 * 60 * 60 * 1000); // каждые 4 часа
 }
 
-ipcMain.handle('wt:update-status', () => updateState);
+ipcMain.handle('wt:update-status', () => ({ ...updateState, current: app.getVersion(), packaged: app.isPackaged }));
+// Ручная проверка «Проверить обновления» из меню профиля. Если обновление уже
+// качается или готово — повторно не проверяем, просто отдаём состояние.
 ipcMain.handle('wt:update-check', async () => {
   if (!app.isPackaged) return { ok: false, error: 'dev' };
+  if (updateState.status === 'downloading' || updateState.status === 'ready' || updateState.status === 'checking') {
+    return { ok: true };
+  }
   try {
     const { autoUpdater } = require('electron-updater');
     updateState = { status: 'checking', version: null };
@@ -871,6 +911,8 @@ ipcMain.handle('wt:update-check', async () => {
     await autoUpdater.checkForUpdates();
     return { ok: true };
   } catch (e) {
+    updateState = { status: 'error', version: null, checkedAt: Date.now(), error: String(e?.message ?? e).slice(0, 200) };
+    notifyUpdate();
     return { ok: false, error: e?.message ?? String(e) };
   }
 });

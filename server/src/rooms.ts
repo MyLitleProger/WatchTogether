@@ -1,9 +1,9 @@
 // REST API: комнаты, провайдеры, поиск, информация о сервере.
-import type { FastifyInstance } from 'fastify';
+import type { FastifyInstance, FastifyRequest } from 'fastify';
 import crypto from 'node:crypto';
 import { Readable } from 'node:stream';
 import {
-  createRoom, getRoom, listRooms, listMembers,
+  createRoom, getRoom, listRooms, listMembers, updateRoomSettings, deleteRoom,
   listProviders, upsertProvider, deleteProvider, db, historyList,
   getClientSecretHash, addClient,
 } from './db.js';
@@ -13,6 +13,8 @@ import { getLordSerialEpisodes, getLordSerialStream } from './providers/lordseri
 import { getRutubeStream, getRutubeSeasonPack } from './providers/rutube.js';
 import { getRuTrackerTopic, ProviderError } from './providers/rutracker.js';
 import { APP_VERSION } from './version.js';
+import { emitRoomMeta, emitRoomDeleted } from './sync.js';
+import { lanHttpsPort, lanCertFingerprint } from './lan-https.js';
 import { deviceName, localAddresses, INSTANCE_ID } from './discovery.js';
 import {
   classifyRequest, requireAccess, isValidProxyToken, proxyToken, safeFetch, SsrfError,
@@ -20,6 +22,22 @@ import {
 } from './security.js';
 
 const newId = (len = 8) => crypto.randomBytes(len).toString('base64url').slice(0, len);
+
+// Кто делает запрос: clientId из заголовков, подтверждённый секретом устройства.
+function requestClient(req: FastifyRequest): string | null {
+  const id = req.headers['x-client-id'];
+  const secret = req.headers['x-client-secret'];
+  if (typeof id !== 'string' || typeof secret !== 'string') return null;
+  return verifyClient(id, secret, { get: getClientSecretHash, add: addClient }) ? id : null;
+}
+
+// Управлять комнатой может её создатель, а также сам компьютер-хост (это его сервер;
+// так же правятся старые комнаты, у которых создатель не записан).
+function canManageRoom(req: FastifyRequest, room: { host_client_id: string | null }): boolean {
+  if (classifyRequest(req) === 'local') return true;
+  const me = requestClient(req);
+  return !!me && room.host_client_id === me;
+}
 
 export async function registerRoutes(app: FastifyInstance) {
   // Информация о сервере (для LAN-discovery, ссылок-приглашений и экрана подключения)
@@ -32,13 +50,19 @@ export async function registerRoutes(app: FastifyInstance) {
     serverTime: Date.now(),
     deviceName: deviceName(),
     addresses: localAddresses(),
+    // HTTPS-порт локальной сети: по нему в браузерах работает микрофон (голосовой чат).
+    httpsPort: lanHttpsPort(),
+    certFingerprint: lanCertFingerprint(),
     id: INSTANCE_ID,
     };
   });
 
   // --- комнаты ---
-  app.get('/api/rooms', async () =>
-    listRooms().map((r) => ({
+  // Скрытые комнаты в списке видит только их создатель (и сам компьютер-хост).
+  app.get('/api/rooms', async (req) => {
+    const me = requestClient(req);
+    const isLocal = classifyRequest(req) === 'local';
+    return listRooms().filter((r) => !r.hidden || isLocal || (me && r.host_client_id === me)).map((r) => ({
       id: r.id,
       name: r.name,
       controlMode: r.control_mode,
@@ -49,12 +73,15 @@ export async function registerRoutes(app: FastifyInstance) {
       state: r.password_hash ? 'paused' : r.state,
       updatedAt: r.updated_at,
       members: listMembers(r.id).length,
-    }))
-  );
+      hidden: !!r.hidden,
+      isOwner: !!me && r.host_client_id === me,
+    }));
+  });
 
   app.post('/api/rooms', async (req, reply) => {
     const body = (req.body ?? {}) as {
       name?: string; password?: string; controlMode?: 'all' | 'host'; hostClientId?: string; hostSecret?: string;
+      hidden?: boolean;
     };
     const name = String(body.name ?? '').trim().slice(0, 100);
     if (!name) return reply.code(400).send({ error: 'Укажите название комнаты' });
@@ -74,6 +101,8 @@ export async function registerRoutes(app: FastifyInstance) {
       position_sec: 0,
       state: 'paused' as const,
       host_client_id: hostOk ? body.hostClientId! : null,
+      // Скрыть можно только комнату с подтверждённым создателем — иначе её никто не увидит.
+      hidden: body.hidden && hostOk ? 1 : 0,
       updated_at: Date.now(),
       created_at: Date.now(),
     };
@@ -102,11 +131,42 @@ export async function registerRoutes(app: FastifyInstance) {
     };
   });
 
-  app.delete('/api/rooms/:id', { preHandler: requireAccess('local', 'lan') }, async (req) => {
+  // Настройки комнаты: название, пароль (пустая строка — убрать), скрытость.
+  app.patch('/api/rooms/:id', async (req, reply) => {
     const { id } = req.params as { id: string };
-    db.prepare(`DELETE FROM members WHERE room_id = ?`).run(id);
-    db.prepare(`DELETE FROM chat_messages WHERE room_id = ?`).run(id);
-    db.prepare(`DELETE FROM rooms WHERE id = ?`).run(id);
+    const room = getRoom(id);
+    if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!canManageRoom(req, room)) return reply.code(403).send({ error: 'Менять настройки может только создатель комнаты' });
+    const body = (req.body ?? {}) as { name?: unknown; password?: unknown; hidden?: unknown };
+    const patch: { name?: string; password_hash?: string | null; hidden?: boolean } = {};
+    if (body.name !== undefined) {
+      const name = String(body.name).trim().slice(0, 100);
+      if (!name) return reply.code(400).send({ error: 'Название не может быть пустым' });
+      patch.name = name;
+    }
+    if (body.password !== undefined) {
+      const pw = typeof body.password === 'string' ? body.password.slice(0, 200) : '';
+      patch.password_hash = pw ? hashPassword(pw) : null;
+    }
+    if (body.hidden !== undefined) {
+      if (body.hidden && !room.host_client_id && !requestClient(req)) {
+        return reply.code(400).send({ error: 'У этой комнаты не записан создатель — скрытую комнату никто не увидит в списке' });
+      }
+      patch.hidden = !!body.hidden;
+    }
+    updateRoomSettings(id, patch);
+    emitRoomMeta(id);
+    const updated = getRoom(id)!;
+    return { ok: true, name: updated.name, hasPassword: !!updated.password_hash, hidden: !!updated.hidden };
+  });
+
+  app.delete('/api/rooms/:id', async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const room = getRoom(id);
+    if (!room) return reply.code(404).send({ error: 'Комната не найдена' });
+    if (!canManageRoom(req, room)) return reply.code(403).send({ error: 'Удалить комнату может только её создатель' });
+    emitRoomDeleted(id);
+    deleteRoom(id);
     return { ok: true };
   });
 

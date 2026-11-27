@@ -5,6 +5,7 @@ import { Player, type PlayerHandle, extractYouTubeId } from '@/components/Player
 import { SearchPanel } from '@/components/SearchPanel';
 import { LibraryPanel } from '@/components/LibraryPanel';
 import { ProxyPicker } from '@/components/ProxyPicker';
+import { RoomSettingsDialog } from '@/components/RoomSettingsDialog';
 import { Chat } from '@/components/Chat';
 import { VoicePanel } from '@/components/VoicePanel';
 import { StreamView } from '@/components/StreamView';
@@ -102,6 +103,13 @@ export default function Room() {
   const [streamPageError, setStreamPageError] = useState<string | null>(null);
 
   const sync = useRoomSync(roomId, nickname, password || undefined);
+
+  // Хуки — до любых ранних return (экран пароля и т.п.): иначе при переходе
+  // с экрана пароля в комнату React падает «Rendered more hooks than during the previous render».
+  // Версия приложения — видна в шапке комнаты, чтобы не гадать при отладке.
+  const [appVersion, setAppVersion] = useState<string | null>(null);
+  useEffect(() => { api.serverInfo().then((i) => setAppVersion(i.version)).catch(() => {}); }, []);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // «Смотреть» в медиатеке на главной: комната создана, видео пришло в state
   // навигации — включаем его один раз, как только вошли и можем управлять.
@@ -704,9 +712,9 @@ export default function Room() {
 
   const amStreamHost = !!sync.streamInfo?.active && sync.streamInfo.hostClientId === getClientId();
 
-  // Версия приложения — видна в шапке комнаты, чтобы не гадать при отладке.
-  const [appVersion, setAppVersion] = useState<string | null>(null);
-  useEffect(() => { api.serverInfo().then((i) => setAppVersion(i.version)).catch(() => {}); }, []);
+  // Настройки комнаты видят её создатель и сам компьютер-хост (сервер всё равно проверит).
+  const canManage = sync.room?.hostClientId === getClientId()
+    || (!!getDesktop() && ['localhost', '127.0.0.1'].includes(window.location.hostname));
 
   return (
     <div className="mx-auto flex min-h-dvh w-full max-w-[1920px] flex-col gap-4 px-4 py-6">
@@ -726,10 +734,27 @@ export default function Room() {
             ? (sync.isHost ? 'Вы хост — управление у вас' : 'Управляет только хост')
             : 'Управлять может каждый'}
         </span>
-        <Button variant="outline" size="sm" className="ml-auto" onClick={copyInvite}>
-          {copied ? 'Скопировано!' : 'Пригласить (ссылка)'}
-        </Button>
+        {sync.room?.hidden && (
+          <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-xs text-zinc-400" title="Не видна в списке комнат у других">скрыта</span>
+        )}
+        <div className="ml-auto flex gap-2">
+          {canManage && sync.room && (
+            <Button variant="outline" size="sm" onClick={() => setSettingsOpen(true)}>Настройки</Button>
+          )}
+          <Button variant="outline" size="sm" onClick={copyInvite}>
+            {copied ? 'Скопировано!' : 'Пригласить (ссылка)'}
+          </Button>
+        </div>
       </header>
+      {canManage && sync.room && (
+        <RoomSettingsDialog
+          room={{ id: sync.room.id, name: sync.room.name, hasPassword: !!sync.room.hasPassword, hidden: !!sync.room.hidden }}
+          open={settingsOpen}
+          onOpenChange={setSettingsOpen}
+          onSaved={() => { /* room:meta придёт по сокету и обновит шапку */ }}
+          onDeleted={() => navigate('/')}
+        />
+      )}
 
       {inviteLinks && inviteLinks.length > 1 && (
         <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">

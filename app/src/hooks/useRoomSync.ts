@@ -9,6 +9,8 @@ export interface RoomMeta {
   name: string;
   controlMode: 'all' | 'host';
   hostClientId: string | null;
+  hasPassword?: boolean;
+  hidden?: boolean;
 }
 
 const HEARTBEAT_MS = 5000;
@@ -67,6 +69,10 @@ export function useRoomSync(roomId: string, nickname: string, password?: string)
     });
 
     socket.on('room:presence', (p: { members: MemberPresence[] }) => setMembers(p.members));
+    // Создатель поменял название/пароль/скрытость — обновляем у всех сразу.
+    socket.on('room:meta', (m: { name: string; hasPassword: boolean; hidden: boolean }) =>
+      setRoom((prev) => (prev ? { ...prev, ...m } : prev)));
+    socket.on('room:deleted', () => setError('Комнату удалил её создатель'));
     socket.on('room:queue', (p: { queue: QueueItem[] }) => setQueue(p.queue));
     socket.on('stream:state', (s: StreamInfo) => setStreamInfo(s));
     socket.on('disconnect', () => setConnected(false));

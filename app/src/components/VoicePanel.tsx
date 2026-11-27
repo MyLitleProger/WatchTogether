@@ -2,7 +2,8 @@
 // Медиа — P2P между участниками (WebRTC), сервер видит только список и иконки.
 import { useEffect, useRef, useState } from 'react';
 import { VoiceManager, type VoicePeerInfo } from '@/lib/voice';
-import { getClientId } from '@/lib/identity';
+import { getClientId, getNickname } from '@/lib/identity';
+import { api, secureVersionUrl } from '@/lib/api';
 import type { Socket } from 'socket.io-client';
 import { Button } from '@/components/ui/button';
 
@@ -36,6 +37,8 @@ export function VoicePanel({ getSocket, connected }: VoicePanelProps) {
   const [deafened, setDeafened] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // По http://<адрес в сети> браузер не даёт микрофон — у сервера есть https-порт для этого.
+  const [secureUrl, setSecureUrl] = useState<string | null>(null);
   // Кто говорит прямо сейчас (по уровню звука) — подсветка аватаров.
   const [speaking, setSpeaking] = useState<Set<string>>(new Set());
 
@@ -68,7 +71,13 @@ export function VoicePanel({ getSocket, connected }: VoicePanelProps) {
       setJoined(true);
     } catch (e) {
       if (e instanceof Error && e.message === 'insecure-context') {
-        setError('Браузер блокирует микрофон по http-ссылке. Голос работает в приложении WatchTogether — установите его на этом устройстве.');
+        const info = await api.serverInfo().catch(() => null);
+        if (info?.httpsPort) {
+          setSecureUrl(secureVersionUrl(info.httpsPort, getNickname()));
+          setError('Браузер даёт микрофон только на защищённой странице. Откройте эту комнату по https — браузер один раз предупредит о сертификате: нажмите «Дополнительно» → «Перейти на сайт».');
+        } else {
+          setError('Браузер блокирует микрофон по http-ссылке, а защищённый адрес у этого сервера недоступен. Обновите WatchTogether на компьютере-хосте.');
+        }
       } else {
         setError('Нет доступа к микрофону — проверьте разрешение в системе/браузере.');
       }
@@ -119,6 +128,11 @@ export function VoicePanel({ getSocket, connected }: VoicePanelProps) {
             {busy ? 'Подключаем микрофон…' : 'Подключиться к голосу'}
           </Button>
           {error && <p className="mt-2 text-xs text-amber-400/90">{error}</p>}
+          {secureUrl && (
+            <Button size="sm" className="mt-2 w-full" onClick={() => { window.location.href = secureUrl; }}>
+              Открыть с голосом (https)
+            </Button>
+          )}
         </div>
       ) : (
         <>

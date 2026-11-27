@@ -9,10 +9,13 @@ import { seedProviders, encryptStoredCookies } from './db.js';
 import { registerRoutes } from './rooms.js';
 import { setupSync } from './sync.js';
 import { registerLibraryRoutes, startLibraryRescans } from './library.js';
+import { startLanHttps } from './lan-https.js';
 import { startDiscoveryResponder, discoverPeers, localAddresses } from './discovery.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.WT_PORT ?? 9345);
+// HTTPS для локальной сети (голосовой чат в браузерах и на других ПК) — см. lan-https.ts.
+const HTTPS_PORT = Number(process.env.WT_HTTPS_PORT ?? 9443);
 const HOST = '0.0.0.0';
 // Собранный фронтенд раздаём как статику: друзья открывают http://<ip>:9345 в браузере.
 const CLIENT_DIST = process.env.WT_CLIENT_DIST ?? path.resolve(__dirname, '..', '..', 'app', 'dist');
@@ -51,6 +54,7 @@ async function main() {
   setupSync(app.server);
   startLibraryRescans(); // медиатека: сканирование в фоне при старте и раз в 10 минут
   startDiscoveryResponder(PORT, localAddresses());
+  startLanHttps(PORT, HTTPS_PORT);
 
   const addrs = localAddresses();
   console.log(`\n  WatchTogether v0.1 запущен`);

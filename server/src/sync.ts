@@ -170,6 +170,21 @@ function leaveVoice(io: Server, socketId: string) {
   }
 }
 
+// Ссылка на Socket.IO для событий из REST (переименование комнаты и т.п.).
+let ioRef: Server | null = null;
+
+// Новые название/пароль/скрытость — всем, кто сейчас в комнате.
+export function emitRoomMeta(roomId: string) {
+  const room = getRoom(roomId);
+  if (!room || !ioRef) return;
+  ioRef.to(roomId).emit('room:meta', { name: room.name, hasPassword: !!room.password_hash, hidden: !!room.hidden });
+}
+
+// Комнату удалили — выводим всех на главную.
+export function emitRoomDeleted(roomId: string) {
+  ioRef?.to(roomId).emit('room:deleted', {});
+}
+
 export function setupSync(httpServer: HttpServer) {
   const io = new Server(httpServer, {
     cors: { origin: true }, // LAN: клиенты подключаются с разных устройств
@@ -219,7 +234,10 @@ export function setupSync(httpServer: HttpServer) {
       ack?.({
         ok: true,
         snapshot: snapshot(roomId),
-        room: { id: room.id, name: room.name, controlMode: room.control_mode, hostClientId: room.host_client_id },
+        room: {
+          id: room.id, name: room.name, controlMode: room.control_mode, hostClientId: room.host_client_id,
+          hasPassword: !!room.password_hash, hidden: !!room.hidden,
+        },
         chat: listChatMessages(roomId).map((m) => ({
           id: m.id, clientId: m.client_id, nickname: m.nickname, text: m.text, ts: m.ts,
         })),
@@ -542,5 +560,6 @@ export function setupSync(httpServer: HttpServer) {
     });
   });
 
+  ioRef = io;
   return io;
 }

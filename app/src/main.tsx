@@ -21,6 +21,18 @@ class ErrorBoundary extends Component<{ children: ReactNode }, { error: string |
   }
 }
 
+{
+  const url = new URL(window.location.href)
+  const nick = url.searchParams.get('nick')
+  if (nick) {
+    try {
+      if (!localStorage.getItem('wt.nickname')) localStorage.setItem('wt.nickname', nick.trim().slice(0, 32))
+    } catch { /* приватный режим */ }
+    url.searchParams.delete('nick')
+    window.history.replaceState(null, '', url.toString())
+  }
+}
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ErrorBoundary>
