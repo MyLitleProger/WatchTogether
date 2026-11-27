@@ -1,7 +1,7 @@
 // Хук синхронизации комнаты: join, приём sync:state, отправка play/pause/seek, heartbeat, очередь.
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { Socket } from 'socket.io-client';
-import { connectSocket, type ChatMessage, type MemberPresence, type QueueItem, type StreamInfo, type SyncState, type WatchSource } from '@/lib/api';
+import { connectSocket, type ChatMessage, type MemberPresence, type QueueItem, type StreamInfo, type SyncState, type WatchSource, setProxyToken } from '@/lib/api';
 import { getClientId } from '@/lib/identity';
 
 export interface RoomMeta {
@@ -34,11 +34,12 @@ export function useRoomSync(roomId: string, nickname: string, password?: string)
       socket.emit(
         'room:join',
         { roomId, clientId: getClientId(), nickname, password },
-        (res: { error?: string; ok?: boolean; snapshot?: SyncState; room?: RoomMeta; chat?: ChatMessage[]; queue?: QueueItem[]; stream?: StreamInfo }) => {
+        (res: { error?: string; ok?: boolean; snapshot?: SyncState; room?: RoomMeta; chat?: ChatMessage[]; queue?: QueueItem[]; stream?: StreamInfo; proxyToken?: string }) => {
           if (res.error || !res.ok) {
             setError(res.error ?? 'Не удалось войти в комнату');
             return;
           }
+          setProxyToken(res.proxyToken);
           setConnected(true);
           setError(null);
           if (res.room) setRoom(res.room);

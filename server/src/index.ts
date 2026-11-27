@@ -21,17 +21,9 @@ async function main() {
 
   const app = Fastify({ logger: false });
 
-  // Клиент может ходить на чужой сервер со своего origin (предпроверка
-  // «Подключиться» на главной) — разрешаем CORS на чтение API. Сервер и так
-  // открыт в LAN, дополнительной поверхности атаки это не создаёт.
-  app.addHook('onSend', (_req, reply, _payload, done) => {
-    reply.header('Access-Control-Allow-Origin', '*');
-    reply.header('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
-    reply.header('Access-Control-Allow-Headers', 'Content-Type');
-    done();
-  });
-  app.options('/*', async (_req, reply) => reply.code(204).send());
-
+  // CORS открыт только у /api/server-info (предпроверка «Подключиться» с чужого
+  // origin) — см. rooms.ts. Глобальный «*» позволял любому сайту в браузере
+  // пользователя дёргать API localhost:9345.
   await registerRoutes(app);
 
   // Активный поиск других хостов в LAN (из UI «найти устройства»).

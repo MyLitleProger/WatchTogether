@@ -10,6 +10,7 @@ import {
   historyUpsert,
 } from './db.js';
 import crypto from 'node:crypto';
+import { proxyToken } from './security.js';
 
 const hashPassword = (p: string) => crypto.createHash('sha256').update(p).digest('hex');
 
@@ -153,16 +154,30 @@ export function setupSync(httpServer: HttpServer) {
   });
 
   io.on('connection', (socket: Socket) => {
+    // Обработчики Socket.IO вызываются в process.nextTick: необработанное
+    // исключение (например, событие без payload) роняло весь сервер.
+    // Обёртка ловит ошибки каждого обработчика и пишет их в лог.
+    const on = (event: string, handler: (...args: any[]) => void) =>
+      socket.on(event, (...args: unknown[]) => {
+        try {
+          handler(...args);
+        } catch (e) {
+          console.warn(`[sync] ошибка в обработчике ${event}:`, e);
+        }
+      });
+
     // Вход в комнату → полный снапшот состояния + история чата
-    socket.on('room:join', (payload: { roomId: string; clientId: string; nickname: string; password?: string }, ack?: (r: unknown) => void) => {
+    on('room:join', (payload: { roomId: string; clientId: string; nickname: string; password?: string }, ack?: (r: unknown) => void) => {
       const { roomId, clientId, nickname, password } = payload ?? {};
-      const room = roomId ? getRoom(roomId) : undefined;
+      if (typeof ack !== 'function') ack = undefined;
+      if (typeof clientId !== 'string' || !clientId || clientId.length > 64) return ack?.({ error: 'Некорректный clientId' });
+      const room = typeof roomId === 'string' && roomId ? getRoom(roomId) : undefined;
       if (!room) return ack?.({ error: 'Комната не найдена' });
       if (room.password_hash) {
-        if (!password) return ack?.({ error: 'NEED_PASSWORD' });
+        if (!password || typeof password !== 'string') return ack?.({ error: 'NEED_PASSWORD' });
         if (hashPassword(password) !== room.password_hash) return ack?.({ error: 'WRONG_PASSWORD' });
       }
-      const nick = (nickname || 'Гость').trim().slice(0, 32) || 'Гость';
+      const nick = String(nickname || 'Гость').trim().slice(0, 32) || 'Гость';
       upsertMember(roomId, clientId, nick);
       presence.set(socket.id, { roomId, clientId });
       socket.join(roomId);
@@ -177,12 +192,14 @@ export function setupSync(httpServer: HttpServer) {
           id: q.id, video: JSON.parse(q.video_json) as WatchSource, addedBy: q.added_by, addedAt: q.added_at,
         })),
         stream: streamInfo(roomId),
+        // Токен медиа-прокси: нужен гостям из интернета (туннель), в LAN не обязателен.
+        proxyToken: proxyToken(),
       });
       broadcastPresence(io, roomId);
     });
 
     // Чат: сохраняем и рассылаем всем в комнате
-    socket.on('chat:message', (p: { text: string }) => {
+    on('chat:message', (p: { text: string }) => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const text = String(p?.text ?? '').trim().slice(0, 500);
@@ -208,7 +225,7 @@ export function setupSync(httpServer: HttpServer) {
       fn(ctx);
     };
 
-    socket.on('sync:play', (p: { positionSec: number }) =>
+    on('sync:play', (p: { positionSec: number }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const pos = Math.max(0, Number(p?.positionSec) || 0);
         updateRoomPlayback(roomId, pos, 'playing');
@@ -217,7 +234,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('sync:pause', (p: { positionSec: number }) =>
+    on('sync:pause', (p: { positionSec: number }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const pos = Math.max(0, Number(p?.positionSec) || 0);
         updateRoomPlayback(roomId, pos, 'paused');
@@ -226,7 +243,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('sync:seek', (p: { positionSec: number }) =>
+    on('sync:seek', (p: { positionSec: number }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const room = getRoom(roomId)!;
         const pos = Math.max(0, Number(p?.positionSec) || 0);
@@ -236,7 +253,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('sync:setVideo', (p: { video: WatchSource | null }) =>
+    on('sync:setVideo', (p: { video: WatchSource | null }) =>
       guarded(socket, ({ roomId, clientId }) => {
         updateRoomVideo(roomId, p?.video ? JSON.stringify(p.video) : null);
         recordHistory(roomId, p?.video ?? null, 0, false);
@@ -247,7 +264,7 @@ export function setupSync(httpServer: HttpServer) {
 
     // Пауза — заодно запоминаем позицию в истории (не чаще раза в 5 с на видео).
     const lastHistoryWrite = new Map<string, number>();
-    socket.on('sync:pause', (p: { positionSec: number }) =>
+    on('sync:pause', (p: { positionSec: number }) =>
       guarded(socket, ({ roomId }) => {
         const room = getRoom(roomId);
         const video = room?.current_video_json ? (JSON.parse(room.current_video_json) as WatchSource) : null;
@@ -263,7 +280,7 @@ export function setupSync(httpServer: HttpServer) {
     );
 
     // Очередь просмотра (только для тех, кто управляет).
-    socket.on('queue:add', (p: { video: WatchSource }) =>
+    on('queue:add', (p: { video: WatchSource }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const video = p?.video;
         if (!video?.url || !video.kind) return;
@@ -273,7 +290,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('queue:remove', (p: { id: number }) =>
+    on('queue:remove', (p: { id: number }) =>
       guarded(socket, ({ roomId, clientId }) => {
         queueRemove(roomId, Number(p?.id) || 0);
         touchMember(roomId, clientId);
@@ -281,7 +298,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('queue:clear', () =>
+    on('queue:clear', () =>
       guarded(socket, ({ roomId, clientId }) => {
         queueClear(roomId);
         touchMember(roomId, clientId);
@@ -291,7 +308,7 @@ export function setupSync(httpServer: HttpServer) {
 
     // Видео закончилось: фиксируем в истории и, если есть очередь, включаем
     // следующее. Событие приходит от всех клиентов разом — берём только первое.
-    socket.on('video:ended', (p: { positionSec?: number }) => {
+    on('video:ended', (p: { positionSec?: number }) => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const room = getRoom(ctx.roomId);
@@ -319,9 +336,10 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // Heartbeat: уточнение позиции и запись в БД, чтобы «продолжить через месяц».
-    socket.on('sync:heartbeat', (p: { positionSec: number; state: 'playing' | 'paused' }) => {
+    on('sync:heartbeat', (p: { positionSec: number; state: 'playing' | 'paused' }) => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
+      if (!p || (p.state !== 'playing' && p.state !== 'paused')) return;
       const room = getRoom(ctx.roomId);
       if (!room) return;
       // Принимаем heartbeat только если клиентское состояние совпадает с серверным,
@@ -343,7 +361,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // --- голосовая комната (только присутствие + сигналинг; медиа — P2P) ---
-    socket.on('voice:join', () => {
+    on('voice:join', () => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const nick = listMembers(ctx.roomId).find((m) => m.client_id === ctx.clientId)?.nickname ?? 'Гость';
@@ -353,9 +371,9 @@ export function setupSync(httpServer: HttpServer) {
       broadcastVoice(io, ctx.roomId);
     });
 
-    socket.on('voice:leave', () => leaveVoice(io, socket.id));
+    on('voice:leave', () => leaveVoice(io, socket.id));
 
-    socket.on('voice:state', (p: { muted?: boolean; deafened?: boolean }) => {
+    on('voice:state', (p: { muted?: boolean; deafened?: boolean }) => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const peer = voiceRooms.get(ctx.roomId)?.get(ctx.clientId);
@@ -366,7 +384,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // SDP/ICE конкретному участнику комнаты.
-    socket.on('voice:signal', (p: { to?: string; data?: unknown }) => {
+    on('voice:signal', (p: { to?: string; data?: unknown }) => {
       const ctx = presence.get(socket.id);
       if (!ctx || !p?.to || p.data == null) return;
       for (const [sid, c] of presence.entries()) {
@@ -377,7 +395,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // --- трансляция сайта (медиа — P2P; тут состояние, сигналинг, ввод) ---
-    socket.on('stream:start', (p: { url?: string; title?: string; playerOnly?: boolean }) =>
+    on('stream:start', (p: { url?: string; title?: string; playerOnly?: boolean }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const url = String(p?.url ?? '').trim();
         if (!/^https?:\/\//i.test(url)) return;
@@ -391,7 +409,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('stream:control', (p: { allow?: boolean }) =>
+    on('stream:control', (p: { allow?: boolean }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const s = roomStreams.get(roomId);
         if (!s || s.hostClientId !== clientId) return; // управляет только ведущий
@@ -400,7 +418,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('stream:stop', () =>
+    on('stream:stop', () =>
       guarded(socket, ({ roomId, clientId }) => {
         const s = roomStreams.get(roomId);
         if (!s || s.hostClientId !== clientId) return;
@@ -412,7 +430,7 @@ export function setupSync(httpServer: HttpServer) {
     );
 
     // Зритель просит поток → передаём ведущему, тот создаёт P2P-соединение.
-    socket.on('stream:watch', () => {
+    on('stream:watch', () => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const s = roomStreams.get(ctx.roomId);
@@ -421,7 +439,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // SDP/ICE — только в паре зритель ↔ ведущий.
-    socket.on('stream:signal', (p: { to?: string; data?: unknown }) => {
+    on('stream:signal', (p: { to?: string; data?: unknown }) => {
       const ctx = presence.get(socket.id);
       if (!ctx || !p?.to || p.data == null) return;
       const s = roomStreams.get(ctx.roomId);
@@ -432,7 +450,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // Ввод мыши от зрителей — только когда ведущий разрешил управление.
-    socket.on('stream:input', (p: Record<string, unknown>) => {
+    on('stream:input', (p: Record<string, unknown>) => {
       const ctx = presence.get(socket.id);
       if (!ctx) return;
       const s = roomStreams.get(ctx.roomId);
@@ -441,7 +459,7 @@ export function setupSync(httpServer: HttpServer) {
     });
 
     // Индикатор загрузки страницы трансляции: ведущий → всем остальным в комнате.
-    socket.on('stream:loading', (p: { loading?: boolean; error?: string }) =>
+    on('stream:loading', (p: { loading?: boolean; error?: string }) =>
       guarded(socket, ({ roomId, clientId }) => {
         const s = roomStreams.get(roomId);
         if (!s?.active || s.hostClientId !== clientId) return;
@@ -452,7 +470,7 @@ export function setupSync(httpServer: HttpServer) {
       })
     );
 
-    socket.on('disconnect', () => {
+    on('disconnect', () => {
       leaveVoice(io, socket.id);
       const ctx = presence.get(socket.id);
       if (ctx) {

@@ -12,19 +12,26 @@ import { getLordSerialEpisodes, getLordSerialStream } from './providers/lordseri
 import { getRutubeStream, getRutubeSeasonPack } from './providers/rutube.js';
 import { APP_VERSION } from './version.js';
 import { deviceName, localAddresses, INSTANCE_ID } from './discovery.js';
+import {
+  classifyRequest, requireAccess, isValidProxyToken, proxyToken, safeFetch, SsrfError,
+} from './security.js';
 
 const newId = (len = 8) => crypto.randomBytes(len).toString('base64url').slice(0, len);
 
 export async function registerRoutes(app: FastifyInstance) {
   // Информация о сервере (для LAN-discovery, ссылок-приглашений и экрана подключения)
-  app.get('/api/server-info', async () => ({
+  app.get('/api/server-info', async (_req, reply) => {
+    // Единственная ручка с CORS: предпроверка «Подключиться» с чужого origin.
+    reply.header('Access-Control-Allow-Origin', '*');
+    return {
     name: 'WatchTogether',
     version: APP_VERSION,
     serverTime: Date.now(),
     deviceName: deviceName(),
     addresses: localAddresses(),
     id: INSTANCE_ID,
-  }));
+    };
+  });
 
   // --- комнаты ---
   app.get('/api/rooms', async () =>
@@ -80,7 +87,7 @@ export async function registerRoutes(app: FastifyInstance) {
     };
   });
 
-  app.delete('/api/rooms/:id', async (req) => {
+  app.delete('/api/rooms/:id', { preHandler: requireAccess('local', 'lan') }, async (req) => {
     const { id } = req.params as { id: string };
     db.prepare(`DELETE FROM members WHERE room_id = ?`).run(id);
     db.prepare(`DELETE FROM chat_messages WHERE room_id = ?`).run(id);
@@ -102,7 +109,7 @@ export async function registerRoutes(app: FastifyInstance) {
     })
   );
 
-  app.put('/api/providers/:id', async (req, reply) => {
+  app.put('/api/providers/:id', { preHandler: requireAccess('local') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const body = (req.body ?? {}) as { type?: string; name?: string; config?: object; enabled?: boolean };
     if (!body.name || !body.type) return reply.code(400).send({ error: 'Нужны name и type' });
@@ -124,7 +131,7 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   // Куки сессии из встроенного окна авторизации (Electron) — или сброс пустой строкой.
-  app.post('/api/providers/:id/cookies', async (req, reply) => {
+  app.post('/api/providers/:id/cookies', { preHandler: requireAccess('local') }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const { cookies } = (req.body ?? {}) as { cookies?: string };
     const row = listProviders().find((p) => p.id === id);
@@ -136,7 +143,7 @@ export async function registerRoutes(app: FastifyInstance) {
     return { ok: true, hasCookies: !!config.cookies };
   });
 
-  app.delete('/api/providers/:id', async (req) => {
+  app.delete('/api/providers/:id', { preHandler: requireAccess('local') }, async (req) => {
     deleteProvider((req.params as { id: string }).id);
     return { ok: true };
   });
@@ -244,8 +251,14 @@ export async function registerRoutes(app: FastifyInstance) {
   // CORS — гоняем через сервер: участникам в LAN видео доступно всегда,
   // а hls.js работает same-origin. m3u8 переписываем: сегменты тоже идут через прокси.
   app.get('/api/proxy/stream', async (req, reply) => {
-    const { url, referer } = req.query as { url?: string; referer?: string };
+    const { url, referer, t } = req.query as { url?: string; referer?: string; t?: string };
     if (!url) return reply.code(400).send({ error: 'Нужен url' });
+    // Из интернета (туннель) прокси работает только с токеном участника комнаты —
+    // иначе это открытый прокси, который ходит в сеть с вашего домашнего IP.
+    const hasToken = isValidProxyToken(t);
+    if (!hasToken && classifyRequest(req) === 'public') {
+      return reply.code(403).send({ error: 'Нужен токен доступа (войдите в комнату)' });
+    }
 
     let target: URL;
     try {
@@ -253,26 +266,26 @@ export async function registerRoutes(app: FastifyInstance) {
     } catch {
       return reply.code(400).send({ error: 'Некорректный url' });
     }
-    if (!/^https?:$/.test(target.protocol) || isPrivateHost(target.hostname)) {
-      return reply.code(403).send({ error: 'Этот адрес проксировать нельзя' });
-    }
 
     const range = req.headers.range;
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 20000);
-    let upstream: Response;
+    let upstream: Awaited<ReturnType<typeof safeFetch>>['res'];
+    let finalUrl: URL;
     try {
-      upstream = await fetch(target, {
+      ({ res: upstream, finalUrl } = await safeFetch(target, {
         signal: ctrl.signal,
-        redirect: 'follow',
         headers: {
           'User-Agent': PROXY_UA,
           ...(referer ? { Referer: referer } : {}),
           ...(range ? { Range: range } : {}),
         },
-      });
+      }));
     } catch (e) {
       clearTimeout(timer);
+      if (e instanceof SsrfError || (e as { cause?: unknown })?.cause instanceof SsrfError) {
+        return reply.code(403).send({ error: 'Этот адрес проксировать нельзя' });
+      }
       return reply.code(502).send({ error: `Источник не ответил: ${e instanceof Error ? e.message : e}` });
     }
     clearTimeout(timer);
@@ -287,10 +300,10 @@ export async function registerRoutes(app: FastifyInstance) {
     // Плейлист: читаем целиком и переписываем ссылки на сегменты через прокси.
     if (isPlaylist) {
       const text = await upstream.text();
-      const base = upstream.url || target.toString();
+      const base = finalUrl.toString();
       reply.header('Content-Type', 'application/vnd.apple.mpegurl');
       reply.header('Cache-Control', 'no-cache');
-      return reply.send(rewriteM3U8(text, base, referer));
+      return reply.send(rewriteM3U8(text, base, referer, hasToken ? proxyToken() : undefined));
     }
 
     // Бинарный поток (mp4/ts/m4s): пробрасываем статус и заголовки диапазонов.
@@ -306,30 +319,15 @@ export async function registerRoutes(app: FastifyInstance) {
 
 const PROXY_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36';
 
-// SSRF-защита: не проксируем локальные и приватные адреса (мы в LAN, порт открыт соседям).
-function isPrivateHost(host: string): boolean {
-  const h = host.toLowerCase();
-  if (h === 'localhost' || h === '::1' || h === '[::1]' || h.endsWith('.local') || h.endsWith('.internal')) return true;
-  const m = h.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
-  if (m) {
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-  }
-  return false;
-}
-
 // Перепись m3u8: URI сегментов/вариантов и URI="..." в атрибутах (ключи, аудио,
 // субтитры) заворачиваем в прокси; относительные ссылки резолвим от плейлиста.
-function rewriteM3U8(text: string, baseUrl: string, referer?: string): string {
+function rewriteM3U8(text: string, baseUrl: string, referer?: string, token?: string): string {
   const wrap = (u: string): string => {
     try {
       const abs = new URL(u, baseUrl).toString();
       let out = `/api/proxy/stream?url=${encodeURIComponent(abs)}`;
       if (referer) out += `&referer=${encodeURIComponent(referer)}`;
+      if (token) out += `&t=${token}`;
       return out;
     } catch {
       return u; // битая строка — оставляем как есть

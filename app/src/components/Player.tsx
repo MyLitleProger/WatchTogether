@@ -6,7 +6,7 @@ import {
 } from 'react';
 import Hls from 'hls.js';
 import { MediaPlayer, type MediaPlayerClass } from 'dashjs';
-import type { WatchSource } from '@/lib/api';
+import { type WatchSource, withProxyToken } from '@/lib/api';
 
 export interface PlayerHandle {
   getPosition: () => { positionSec: number; state: 'playing' | 'paused' };
@@ -195,6 +195,8 @@ export const Player = forwardRef<PlayerHandle, PlayerProps>(function Player(
   // ---- прямое видео (HLS через hls.js, DASH через dash.js) ----
   const isHls = !!video && !isYouTube && /\.m3u8/i.test(video.url);
   const isDash = !!video && !isYouTube && /\.mpd(\?|%3F|#|$)/i.test(video.url);
+  // Ссылки на наш медиа-прокси получают токен доступа (нужен гостям через туннель).
+  const playUrl = video ? withProxyToken(video.url) : '';
   useEffect(() => {
     const v = videoRef.current;
     if (!v || isYouTube || !video) return;
@@ -205,14 +207,14 @@ export const Player = forwardRef<PlayerHandle, PlayerProps>(function Player(
     if (isHls) {
       if (Hls.isSupported()) {
         hls = new Hls({ maxBufferLength: 30, enableWorker: true });
-        hls.loadSource(video.url);
+        hls.loadSource(playUrl);
         hls.attachMedia(v);
       } else if (v.canPlayType('application/vnd.apple.mpegurl')) {
-        v.src = video.url; // Safari — нативно
+        v.src = playUrl; // Safari — нативно
       }
     } else if (isDash) {
       dash = MediaPlayer().create();
-      dash.initialize(v, video.url, false);
+      dash.initialize(v, playUrl, false);
     }
 
     engine.setVolume(volume, muted);
@@ -243,7 +245,7 @@ export const Player = forwardRef<PlayerHandle, PlayerProps>(function Player(
       dash?.reset();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isYouTube, video?.url]);
+  }, [isYouTube, video?.url, playUrl]);
 
   // таймер для YouTube (timeupdate у iframe нет)
   useEffect(() => {
@@ -401,7 +403,7 @@ export const Player = forwardRef<PlayerHandle, PlayerProps>(function Player(
           <video
             ref={videoRef}
             // HLS/DASH отдают hls.js/dash.js через MediaSource — src не ставим, иначе двойная загрузка.
-            src={(isHls && Hls.isSupported()) || isDash ? undefined : video.url}
+            src={(isHls && Hls.isSupported()) || isDash ? undefined : playUrl}
             className="absolute inset-0 h-full w-full"
             onClick={userToggle}
             playsInline

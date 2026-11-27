@@ -2,7 +2,7 @@
 // Поднимает встроенный сервер (Node внутри Electron через ELECTRON_RUN_AS_NODE)
 // и открывает окно с клиентом. В packaged-режиме БД лежит в userData —
 // комнаты и позиции переживают обновления установщика.
-const { app, BrowserWindow, shell, ipcMain, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, shell, ipcMain, session, desktopCapturer, dialog } = require('electron');
 const { spawn, execFile } = require('node:child_process');
 const path = require('node:path');
 const net = require('node:net');
@@ -11,10 +11,71 @@ const fs = require('node:fs');
 
 const PORT = Number(process.env.WT_PORT ?? 9345);
 const AUTH_PARTITION = 'persist:wt-auth';
+// Окно трансляции живёт в своей сессии: прокси трансляции не затрагивает
+// основное окно, а сайты трансляции не делят куки с клиентом.
+const STREAM_PARTITION = 'persist:wt-stream';
+const LOCAL_ORIGIN = `http://localhost:${PORT}`;
 
 let serverProcess = null;
 let mainWindow = null;
 let authWindow = null;
+let quitting = false;
+
+// ─── Кто вызывает мост wtDesktop ───
+// Подключаясь к чужому серверу, основное окно целиком переходит на его origin,
+// а preload-мост остаётся. Поэтому каждый IPC-вызов проверяет, откуда он:
+// свой сервер (localhost) — доверяем; чужой — опасные вызовы запрещены,
+// а трансляция/вход/прокси требуют явного подтверждения пользователя.
+function senderOrigin(e) {
+  try { return new URL(e.senderFrame?.url ?? '').origin; } catch { return null; }
+}
+
+function isLocalSender(e) {
+  return senderOrigin(e) === LOCAL_ORIGIN;
+}
+
+const remoteApprovals = new Set(); // `${origin}|${что}` — разрешено до перезапуска
+
+async function confirmRemote(e, key, message, detail) {
+  if (isLocalSender(e)) return true;
+  const origin = senderOrigin(e);
+  if (!origin || origin === 'null') return false;
+  const k = `${origin}|${key}`;
+  if (remoteApprovals.has(k)) return true;
+  const parent = mainWindow && !mainWindow.isDestroyed() ? mainWindow : undefined;
+  const { response } = await dialog.showMessageBox(parent, {
+    type: 'warning',
+    buttons: ['Отмена', 'Разрешить'],
+    defaultId: 0,
+    cancelId: 0,
+    title: 'WatchTogether',
+    message,
+    detail: `Запрос пришёл от сервера ${origin}.\n\n${detail}\n\nРазрешайте, только если доверяете этому серверу.`,
+  });
+  if (response !== 1) return false;
+  remoteApprovals.add(k);
+  return true;
+}
+
+// Обработчик только для своего сервера; чужим — denied (без исключения в UI).
+function handleLocalOnly(channel, handler, denied = { ok: false, error: 'forbidden' }) {
+  ipcMain.handle(channel, (e, ...args) => (isLocalSender(e) ? handler(e, ...args) : denied));
+}
+
+function isHttpUrl(u) {
+  try { return /^https?:$/.test(new URL(String(u)).protocol); } catch { return false; }
+}
+
+function hostOf(u) {
+  try { return new URL(String(u)).host; } catch { return String(u); }
+}
+
+// Сессиям сайтов (вход, трансляция) — только безобидные разрешения:
+// по умолчанию Electron выдаёт любому сайту камеру, микрофон, геолокацию и т.д.
+function restrictPermissions(ses, allowed) {
+  ses.setPermissionRequestHandler((_wc, permission, callback) => callback(allowed.has(permission)));
+  ses.setPermissionCheckHandler((_wc, permission) => allowed.has(permission));
+}
 
 function resolvePaths() {
   if (app.isPackaged) {
@@ -51,8 +112,21 @@ function startServer(p) {
   serverProcess.on('exit', (code) => {
     console.log(`[server] завершился с кодом ${code}`);
     serverProcess = null;
+    // Сервер упал сам (не выход из приложения) — поднимаем заново,
+    // но не чаще 5 раз за минуту, чтобы не крутиться в цикле падений.
+    if (quitting) return;
+    const now = Date.now();
+    serverRestarts = serverRestarts.filter((t) => now - t < 60000);
+    if (serverRestarts.length >= 5) {
+      console.error('[server] слишком много падений подряд — перезапуск остановлен');
+      return;
+    }
+    serverRestarts.push(now);
+    setTimeout(() => { if (!quitting && !serverProcess) startServer(p); }, 1000);
   });
 }
+
+let serverRestarts = [];
 
 function waitForPort(port, timeoutMs = 15000) {
   const deadline = Date.now() + timeoutMs;
@@ -95,13 +169,15 @@ async function createWindow() {
       preload: path.join(__dirname, 'preload.cjs'),
     },
   });
-  // Внешние ссылки — в системный браузер, не в окне приложения.
+  // Внешние ссылки — в системный браузер, не в окне приложения. Новое окно
+  // приложения (с preload-мостом) — только для своего сервера; сравниваем
+  // origin целиком (подстрока пропускала https://evil.com/?localhost:9345).
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith('http') && !url.includes(`localhost:${PORT}`)) {
-      shell.openExternal(url);
-      return { action: 'deny' };
-    }
-    return { action: 'allow' };
+    let origin = null;
+    try { origin = new URL(url).origin; } catch { /* битая ссылка */ }
+    if (origin === LOCAL_ORIGIN) return { action: 'allow' };
+    if (isHttpUrl(url)) shell.openExternal(url);
+    return { action: 'deny' };
   });
   await mainWindow.loadURL(`http://localhost:${PORT}/`);
 }
@@ -115,6 +191,9 @@ app.whenReady().then(async () => {
     callback(ALLOWED_PERMISSIONS.has(permission));
   });
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(permission));
+  const SITE_PERMISSIONS = new Set(['clipboard-sanitized-write', 'fullscreen', 'pointerLock']);
+  restrictPermissions(session.fromPartition(STREAM_PARTITION), SITE_PERMISSIONS);
+  restrictPermissions(session.fromPartition(AUTH_PARTITION), SITE_PERMISSIONS);
 
   // Захват окна трансляции: когда рендерер зовёт getDisplayMedia, отдаём ему
   // заранее найденное окно со стримом + системный звук (loopback, Windows).
@@ -271,7 +350,11 @@ function sniffStream({ pageUrl, season, episode }) {
 }
 
 function registerAuthHandlers() {
-  ipcMain.handle('wt:open-auth', (_e, { providerId, url }) => {
+  ipcMain.handle('wt:open-auth', async (e, { providerId, url } = {}) => {
+    if (!isHttpUrl(url) || typeof providerId !== 'string') return { opened: false, reason: 'bad-url' };
+    const allowed = await confirmRemote(e, `auth|${hostOf(url)}`,
+      'Открыть окно входа на сайт?', `Сайт: ${hostOf(url)}`);
+    if (!allowed) return { opened: false, reason: 'denied' };
     if (authWindow) {
       authWindow.focus();
       return { opened: false, reason: 'already-open' };
@@ -285,9 +368,10 @@ function registerAuthHandlers() {
         title: 'Авторизация — WatchTogether',
         webPreferences: { partition: AUTH_PARTITION },
       });
-      // Сторонние ссылки из окна авторизации — в системный браузер.
+      // Сторонние ссылки из окна авторизации — в системный браузер, только
+      // http(s): иные схемы (ms-msdt:, search-ms: и т.п.) — путь к запуску кода.
       authWindow.webContents.setWindowOpenHandler(({ url: u }) => {
-        shell.openExternal(u);
+        if (isHttpUrl(u)) shell.openExternal(u);
         return { action: 'deny' };
       });
       authWindow.on('closed', async () => {
@@ -304,7 +388,7 @@ function registerAuthHandlers() {
     });
   });
 
-  ipcMain.handle('wt:clear-auth', async (_e, { providerId }) => {
+  handleLocalOnly('wt:clear-auth', async (_e, { providerId } = {}) => {
     const ses = session.fromPartition(AUTH_PARTITION);
     await ses.clearStorageData();
     await fetch(`http://localhost:${PORT}/api/providers/${providerId}/cookies`, {
@@ -315,7 +399,10 @@ function registerAuthHandlers() {
     return { cleared: true };
   });
 
-  ipcMain.handle('wt:sniff-stream', async (_e, { pageUrl, season, episode }) => {
+  // Перехват потока разрешён и с чужого сервера (гость смотрит серию у друга):
+  // окно скрыто, наружу уходит только найденная ссылка на медиа. Но только http(s).
+  ipcMain.handle('wt:sniff-stream', async (_e, { pageUrl, season, episode } = {}) => {
+    if (!isHttpUrl(pageUrl)) return { ok: false, error: 'bad-url' };
     if (sniffBusy) return { ok: false, error: 'busy' };
     sniffBusy = true;
     try {
@@ -342,7 +429,12 @@ function closeStreamWindow() {
   streamSourceId = null;
 }
 
-ipcMain.handle('wt:stream-open', async (_e, { url, playerOnly }) => {
+ipcMain.handle('wt:stream-open', async (e, { url, playerOnly } = {}) => {
+  if (!isHttpUrl(url)) return { ok: false, error: 'bad-url' };
+  const allowed = await confirmRemote(e, `stream|${hostOf(url)}`,
+    'Начать трансляцию страницы с вашего компьютера?',
+    `Страница ${url} откроется в скрытом окне, и её изображение и звук увидят участники комнаты.`);
+  if (!allowed) return { ok: false, error: 'denied' };
   closeStreamWindow();
   const marker = `WT Stream ${Date.now()}`;
   const win = new BrowserWindow({
@@ -357,7 +449,7 @@ ipcMain.handle('wt:stream-open', async (_e, { url, playerOnly }) => {
     // Тёмный фон вместо белого: при навигации страница мгновение не нарисована,
     // и без этого зрители видят белую вспышку на каждом переходе.
     backgroundColor: '#0a0a0a',
-    webPreferences: { backgroundThrottling: false },
+    webPreferences: { backgroundThrottling: false, partition: STREAM_PARTITION },
   });
   streamWindow = win;
   win.setMenu(null);
@@ -571,7 +663,7 @@ async function runTunnel() {
   return false;
 }
 
-ipcMain.handle('wt:tunnel-start', async () => {
+handleLocalOnly('wt:tunnel-start', async () => {
   if (tunnelUrl) return { ok: true, url: tunnelUrl, provider: tunnelProvider };
   tunnelWanted = true;
   tunnelRetries = 0;
@@ -605,12 +697,13 @@ ipcMain.handle('wt:tunnel-start', async () => {
   return { ok: false, error: 'Туннель не поднялся. Пробуем ещё в фоне — если получится, ссылка появится сама.' };
 });
 
-ipcMain.handle('wt:tunnel-stop', () => {
+handleLocalOnly('wt:tunnel-stop', () => {
   stopTunnel();
   return { ok: true };
 });
 
-ipcMain.handle('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl, provider: tunnelProvider }));
+handleLocalOnly('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl, provider: tunnelProvider }),
+  { active: false, url: null, provider: null });
 
 // Прокси для окна трансляции: у многих VPN — раздельное туннелирование по
 // приложениям или вообще расширение браузера, поэтому скрытое окно трансляции
@@ -618,10 +711,20 @@ ipcMain.handle('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl,
 // указывает локальный прокси своего VPN-клиента (например socks5://127.0.0.1:10808),
 // и страницы трансляции идут через него. Локальные адреса обходят прокси,
 // чтобы не ломать связь с нашим сервером и LAN-гостями.
-ipcMain.handle('wt:set-proxy', async (_e, { rules }) => {
+// Одна запись вида схема://хост:порт — без списков правил и PAC.
+const PROXY_RULE = /^(socks5|socks4|socks|http|https):\/\/[a-z0-9.\-[\]:]+:\d{1,5}$/i;
+
+ipcMain.handle('wt:set-proxy', async (e, { rules } = {}) => {
   const r = String(rules ?? '').trim();
+  if (r && !PROXY_RULE.test(r)) return { ok: false, error: 'Формат прокси: socks5://127.0.0.1:10808' };
+  // Сброс прокси безопасен всегда; включение по просьбе чужого сервера — с подтверждением.
+  if (r && !(await confirmRemote(e, `proxy|${r}`,
+    'Пустить страницы трансляции через прокси?', `Прокси: ${r}`))) {
+    return { ok: false, error: 'denied' };
+  }
   try {
-    await session.defaultSession.setProxy(r
+    // Только сессия окна трансляции: основное окно и обновления идут напрямую.
+    await session.fromPartition(STREAM_PARTITION).setProxy(r
       ? { proxyRules: r, proxyBypassRules: 'localhost;127.0.0.1;<local>;192.168.*;10.*;169.254.*' }
       : {});
     return { ok: true };
@@ -726,12 +829,12 @@ function ztServiceState() {
   });
 }
 
-ipcMain.handle('wt:zt-status', async () => {
+handleLocalOnly('wt:zt-status', async () => {
   const cli = findZtCli();
   if (!cli) return { installed: false, running: false };
   const state = await ztServiceState();
   return { installed: true, running: state === 'running' };
-});
+}, { installed: false, running: false });
 
 function ztElevatedCli(args) {
   return new Promise((resolve) => {
@@ -749,13 +852,13 @@ function ztElevatedCli(args) {
 
 const ZT_NET_ID = /^[0-9a-f]{16}$/;
 
-ipcMain.handle('wt:zt-join', (_e, { networkId }) => {
+handleLocalOnly('wt:zt-join', (_e, { networkId } = {}) => {
   const id = String(networkId ?? '').trim().toLowerCase();
   if (!ZT_NET_ID.test(id)) return { ok: false, error: 'ID сети — 16 hex-символов (например 1d71939404a1b2c3)' };
   return ztElevatedCli(['join', id]);
 });
 
-ipcMain.handle('wt:zt-leave', (_e, { networkId }) => {
+handleLocalOnly('wt:zt-leave', (_e, { networkId } = {}) => {
   const id = String(networkId ?? '').trim().toLowerCase();
   if (!ZT_NET_ID.test(id)) return { ok: false, error: 'ID сети — 16 hex-символов' };
   return ztElevatedCli(['leave', id]);
@@ -767,6 +870,7 @@ ipcMain.handle('wt:zt-download', () => {
 });
 
 app.on('window-all-closed', () => {
+  quitting = true;
   closeStreamWindow();
   stopTunnel();
   if (serverProcess) serverProcess.kill();
@@ -774,6 +878,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', () => {
+  quitting = true;
   closeStreamWindow();
   stopTunnel();
   if (serverProcess) serverProcess.kill();

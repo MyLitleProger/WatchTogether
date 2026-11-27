@@ -164,6 +164,19 @@ export const api = {
     req<{ history: HistoryEntry[] }>(`/api/rooms/${roomId}/history`),
 };
 
+// Токен медиа-прокси выдаётся сервером при входе в комнату. Из LAN прокси
+// работает и без него, а гостям через интернет-туннель он обязателен.
+let proxyAccessToken: string | null = null;
+export function setProxyToken(t: string | null | undefined) {
+  proxyAccessToken = t || null;
+}
+
+// Добавляет токен к ссылкам на наш медиа-прокси (в т.ч. сохранённым в истории/очереди).
+export function withProxyToken(url: string): string {
+  if (!proxyAccessToken || !url.startsWith('/api/proxy/stream?') || /[?&]t=/.test(url)) return url;
+  return `${url}&t=${encodeURIComponent(proxyAccessToken)}`;
+}
+
 // Обёртка потока в серверный медиа-прокси (Referer + CORS + доступность для LAN).
 export function proxiedStream(url: string, referer?: string): string {
   let p = `/api/proxy/stream?url=${encodeURIComponent(url)}`;

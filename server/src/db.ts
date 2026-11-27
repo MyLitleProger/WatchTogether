@@ -72,7 +72,23 @@ CREATE TABLE IF NOT EXISTS history (
   PRIMARY KEY (room_id, url)
 );
 CREATE INDEX IF NOT EXISTS idx_history_room ON history (room_id, updated_at);
+
+-- Служебные настройки сервера (секреты и т.п.), ключ → значение.
+CREATE TABLE IF NOT EXISTS settings (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
 `);
+
+export function getSetting(key: string): string | undefined {
+  const row = db.prepare(`SELECT value FROM settings WHERE key = ?`).get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+export function setSetting(key: string, value: string) {
+  db.prepare(`INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(key, value);
+}
 
 // --- типы ---
 export interface RoomRow {
