@@ -36,6 +36,17 @@ const files = [
     read: (s) => /APP_VERSION\s*=\s*'([^']+)'/.exec(s)?.[1],
     write: (s) => s.replace(/(APP_VERSION\s*=\s*')[^']+(')/, `$1${version}$2`),
   },
+  // Лок-файлы хранят версию самого пакета — держим их в ногу, чтобы не расходились.
+  ...['desktop/package-lock.json', 'server/package-lock.json'].map((file) => ({
+    file,
+    read: (s) => JSON.parse(s).version,
+    write: (s) => {
+      const lock = JSON.parse(s);
+      lock.version = version;
+      if (lock.packages?.['']) lock.packages[''].version = version;
+      return JSON.stringify(lock, null, 2) + '\n';
+    },
+  })),
 ];
 
 let mismatch = false;

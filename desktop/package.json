@@ -1,6 +1,6 @@
 {
   "name": "watchtogether-desktop",
-  "version": "0.9.2",
+  "version": "0.9.3",
   "private": true,
   "description": "Electron-обёртка WatchTogether",
   "main": "main.cjs",
