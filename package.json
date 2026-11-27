@@ -9,6 +9,7 @@
     "build": "node build.mjs",
     "start": "npm --prefix server run start",
     "smoke": "node server/scripts/smoke-sync.mjs",
-    "dist": "node build.mjs --installer"
+    "dist": "node build.mjs --installer",
+    "set-version": "node scripts/set-version.mjs"
   }
 }
