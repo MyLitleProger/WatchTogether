@@ -39,12 +39,34 @@ export interface WtDesktop {
   openMagnet?(magnet: string, title?: string): Promise<{ ok: boolean; error?: string }>;
   // Прокси для страниц трансляции: 'socks5://127.0.0.1:10808' или '' — выкл.
   setProxy(rules: string): Promise<{ ok: boolean; error?: string }>;
+  // Поиск прокси: настройки Windows (их использует браузер) + найденные локальные прокси.
+  proxyScan?(): Promise<ProxyScanResult>;
+  // Проверка выбора ('system' | 'direct' | 'socks5://…'): открывается ли YouTube и за сколько.
+  proxyTest?(rules: string): Promise<{ ok: boolean; ms?: number; error?: string }>;
   // Автообновления из GitHub Releases.
   updateStatus(): Promise<{ status: string; version: string | null }>;
   updateCheck(): Promise<{ ok: boolean; error?: string }>;
   updateInstall(): Promise<void>;
   // Смена статуса обновления: idle | checking | downloading | ready | error.
   onUpdate(cb: (s: { status: string; version: string | null }) => void): () => void;
+}
+
+export interface FoundProxy {
+  port: number;
+  pid: number;
+  process: string;
+  label: string | null;   // «V2Ray / Xray», «Clash»… по имени программы
+  type: 'socks5' | 'http';
+  auth: boolean;          // требует логин/пароль — так не подойдёт
+  rules: string;          // готовое правило: socks5://127.0.0.1:10808
+  isSystem: boolean;      // этот же прокси указан в настройках Windows
+}
+
+export interface ProxyScanResult {
+  ok: boolean;
+  error?: string;
+  system?: { enabled: boolean; server: string | null; pac: string | null; rules: string | null };
+  found: FoundProxy[];
 }
 
 export function getDesktop(): WtDesktop | null {

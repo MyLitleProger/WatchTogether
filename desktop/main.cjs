@@ -220,6 +220,8 @@ app.whenReady().then(async () => {
   session.defaultSession.setPermissionCheckHandler((_wc, permission) => ALLOWED_PERMISSIONS.has(permission));
   const SITE_PERMISSIONS = new Set(['clipboard-sanitized-write', 'fullscreen', 'pointerLock']);
   restrictPermissions(session.fromPartition(STREAM_PARTITION), SITE_PERMISSIONS);
+  // Окно трансляции по умолчанию ходит в сеть как браузер — через системный прокси Windows.
+  session.fromPartition(STREAM_PARTITION).setProxy({ mode: 'system' }).catch(() => {});
   restrictPermissions(session.fromPartition(AUTH_PARTITION), SITE_PERMISSIONS);
 
   // Захват окна трансляции: когда рендерер зовёт getDisplayMedia, отдаём ему
@@ -738,27 +740,77 @@ handleLocalOnly('wt:tunnel-status', () => ({ active: !!tunnelUrl, url: tunnelUrl
 // указывает локальный прокси своего VPN-клиента (например socks5://127.0.0.1:10808),
 // и страницы трансляции идут через него. Локальные адреса обходят прокси,
 // чтобы не ломать связь с нашим сервером и LAN-гостями.
-// Одна запись вида схема://хост:порт — без списков правил и PAC.
+// Значение выбора:
+//   'system' (или пусто) — как в Windows/браузере: системный прокси и PAC. По умолчанию.
+//   'direct'             — напрямую, мимо любых прокси.
+//   'socks5://127.0.0.1:10808' и т.п. — конкретный прокси (одна запись, без PAC).
+// Раньше пустая строка превращалась в setProxy({}) = «напрямую»: окно трансляции
+// шло мимо системного прокси, через который работает браузер, — отсюда
+// «в браузере открывается, в трансляции нет».
 const PROXY_RULE = /^(socks5|socks4|socks|http|https):\/\/[a-z0-9.\-[\]:]+:\d{1,5}$/i;
+const PROXY_BYPASS = 'localhost;127.0.0.1;<local>;192.168.*;10.*;169.254.*';
+
+function proxyConfigFor(choice) {
+  const r = String(choice ?? '').trim();
+  if (!r || r === 'system') return { mode: 'system' };
+  if (r === 'direct') return { mode: 'direct' };
+  if (PROXY_RULE.test(r)) return { mode: 'fixed_servers', proxyRules: r, proxyBypassRules: PROXY_BYPASS };
+  return null;
+}
 
 ipcMain.handle('wt:set-proxy', async (e, { rules } = {}) => {
   const r = String(rules ?? '').trim();
-  if (r && !PROXY_RULE.test(r)) return { ok: false, error: 'Формат прокси: socks5://127.0.0.1:10808' };
-  // Сброс прокси безопасен всегда; включение по просьбе чужого сервера — с подтверждением.
-  if (r && !(await confirmRemote(e, `proxy|${r}`,
+  const config = proxyConfigFor(r);
+  if (!config) return { ok: false, error: 'Формат прокси: socks5://127.0.0.1:10808' };
+  // «Как в Windows» и «напрямую» безопасны всегда; конкретный прокси по просьбе
+  // чужого сервера — с подтверждением.
+  if (config.mode === 'fixed_servers' && !(await confirmRemote(e, `proxy|${r}`,
     'Пустить страницы трансляции через прокси?', `Прокси: ${r}`))) {
     return { ok: false, error: 'denied' };
   }
   try {
-    // Только сессия окна трансляции: основное окно и обновления идут напрямую.
-    await session.fromPartition(STREAM_PARTITION).setProxy(r
-      ? { proxyRules: r, proxyBypassRules: 'localhost;127.0.0.1;<local>;192.168.*;10.*;169.254.*' }
-      : {});
+    // Только сессия окна трансляции: основное окно и обновления идут как шли.
+    await session.fromPartition(STREAM_PARTITION).setProxy(config);
     return { ok: true };
-  } catch (e) {
-    return { ok: false, error: e?.message ?? String(e) };
+  } catch (err) {
+    return { ok: false, error: err?.message ?? String(err) };
   }
 });
+
+// Поиск прокси в системе (см. proxy-scan.cjs). Только для своего сервера:
+// список локальных портов — не дело чужих серверов.
+const { scanProxies } = require('./proxy-scan.cjs');
+handleLocalOnly('wt:proxy-scan', () => scanProxies({
+  ownPids: new Set([process.pid, serverProcess?.pid, ...app.getAppMetrics().map((m) => m.pid)].filter(Boolean)),
+  skipPort: PORT,
+}), { ok: false, error: 'forbidden', found: [] });
+
+// ─── Проверка: открывается ли YouTube через выбранный вариант ───
+let proxyTestSeq = 0;
+handleLocalOnly('wt:proxy-test', async (_e, { rules } = {}) => {
+  const config = proxyConfigFor(rules);
+  if (!config) return { ok: false, error: 'Неверный формат прокси' };
+  // Своя временная (не сохраняемая) сессия на каждую проверку — проверки идут параллельно.
+  const ses = session.fromPartition(`wt-proxytest-${++proxyTestSeq}`);
+  const target = 'https://www.youtube.com/generate_204';
+  const started = Date.now();
+  try {
+    await ses.setProxy(config);
+    await ses.closeAllConnections?.();
+    const res = await ses.fetch(target, { signal: AbortSignal.timeout(10000), cache: 'no-store' });
+    const ms = Date.now() - started;
+    return res.status === 204 || res.ok
+      ? { ok: true, ms }
+      : { ok: false, ms, error: `YouTube ответил HTTP ${res.status}` };
+  } catch (err) {
+    const msg = String(err?.message ?? err);
+    return {
+      ok: false,
+      ms: Date.now() - started,
+      error: /abort|timeout/i.test(msg) ? 'Не ответил за 10 с' : msg.replace(/^net::/, '').slice(0, 120),
+    };
+  }
+}, { ok: false, error: 'forbidden' });
 
 // ─── Автообновления из GitHub Releases ───
 // electron-updater смотрит latest.yml релиза MyLitleProger/WatchTogether:

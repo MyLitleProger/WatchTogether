@@ -38,6 +38,10 @@ contextBridge.exposeInMainWorld('wtDesktop', {
   // Прокси для страниц трансляции (YouTube и пр. через VPN с раздельным
   // туннелированием): 'socks5://127.0.0.1:10808' или '' — отключить.
   setProxy: (rules) => ipcRenderer.invoke('wt:set-proxy', { rules }),
+  // Поиск прокси в системе (настройки Windows + локальные SOCKS5/HTTP-порты) и проверка,
+  // открывается ли YouTube через выбранный вариант ('system' | 'direct' | 'socks5://…').
+  proxyScan: () => ipcRenderer.invoke('wt:proxy-scan'),
+  proxyTest: (rules) => ipcRenderer.invoke('wt:proxy-test', { rules }),
   // Автообновления из GitHub Releases.
   updateStatus: () => ipcRenderer.invoke('wt:update-status'),
   updateCheck: () => ipcRenderer.invoke('wt:update-check'),

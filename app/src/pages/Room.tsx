@@ -4,6 +4,7 @@ import { Navigate, useLocation, useNavigate, useParams } from 'react-router';
 import { Player, type PlayerHandle, extractYouTubeId } from '@/components/Player';
 import { SearchPanel } from '@/components/SearchPanel';
 import { LibraryPanel } from '@/components/LibraryPanel';
+import { ProxyPicker } from '@/components/ProxyPicker';
 import { Chat } from '@/components/Chat';
 import { VoicePanel } from '@/components/VoicePanel';
 import { StreamView } from '@/components/StreamView';
@@ -84,7 +85,15 @@ export default function Room() {
   const [streamPlayerOnly, setStreamPlayerOnly] = useState(true);
   // Прокси для страниц трансляции: VPN многих работает только для браузера,
   // а скрытое окно идёт напрямую (YouTube: «Нет подключения»). Храним локально.
-  const [streamProxy, setStreamProxy] = useState(() => localStorage.getItem('wt-stream-proxy') ?? '');
+  // Как окно трансляции выходит в интернет: 'system' (как Windows/браузер, по умолчанию),
+  // 'direct' или конкретный прокси. Старое пустое значение = «как в Windows».
+  const [streamProxy, setStreamProxyState] = useState(() => {
+    try { return localStorage.getItem('wt-stream-proxy') || 'system'; } catch { return 'system'; }
+  });
+  const setStreamProxy = (v: string) => {
+    setStreamProxyState(v);
+    try { localStorage.setItem('wt-stream-proxy', v); } catch { /* приватный режим */ }
+  };
   const [streamBusy, setStreamBusy] = useState(false);
   // Загрузка страницы в окне трансляции: у ведущего — локальные события Electron,
   // у зрителей — ретрансляция по комнате. Нужно, чтобы вместо белого экрана
@@ -230,8 +239,7 @@ export default function Room() {
     setStreamPageError(null);
     try {
       // Прокси (если задан) — до открытия окна: страница сразу пойдёт через VPN.
-      const proxy = streamProxy.trim();
-      localStorage.setItem('wt-stream-proxy', proxy);
+      const proxy = streamProxy.trim() || 'system';
       await d.setProxy(proxy);
       const host = new StreamHost(socket);
       host.onStream = (s) => setHostStream(s);
@@ -1154,20 +1162,7 @@ export default function Room() {
                         />
                         Только плеер: заблокировать переходы по странице (для LostFilm/LordSerial)
                       </label>
-                      <div className="flex flex-col gap-1">
-                        <Input
-                          value={streamProxy}
-                          onChange={(e) => setStreamProxy(e.target.value)}
-                          placeholder="Прокси для трансляции (необязательно): socks5://127.0.0.1:10808"
-                          aria-label="Прокси для трансляции"
-                        />
-                        <p className="text-xs text-zinc-500">
-                          Если сайт доступен только через VPN (YouTube пишет «Нет подключения»): укажите локальный
-                          прокси вашего VPN-клиента — у V2Ray/Nekoray это обычно socks5://127.0.0.1:10808,
-                          у sing-box — socks5://127.0.0.1:2080 (смотрите в настройках «смешанный/socks порт»).
-                          Комната и локальная сеть идут мимо прокси — конфликта не будет.
-                        </p>
-                      </div>
+                      <ProxyPicker value={streamProxy} onChange={setStreamProxy} />
                       <div>
                         <Button onClick={startStream} disabled={streamBusy || !streamUrlInput.trim()}>
                           {streamBusy ? 'Запускаем…' : 'Начать трансляцию'}
